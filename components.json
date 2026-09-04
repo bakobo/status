@@ -1,0 +1,37 @@
+{
+  "witness-de": {
+    "display": "DE witness — de.wit.bakobo.com",
+    "job": "witness-de",
+    "kind": "witness"
+  },
+  "witness-ca": {
+    "display": "CA witness — ca.wit.bakobo.com",
+    "job": "witness-ca",
+    "kind": "witness"
+  },
+  "witness-jp": {
+    "display": "JP witness — jp.wit.bakobo.com",
+    "job": "witness-jp",
+    "kind": "witness"
+  },
+  "witness-br": {
+    "display": "BR witness — br.wit.bakobo.com",
+    "job": "witness-br",
+    "kind": "witness"
+  },
+  "bakobo-com": {
+    "display": "bakobo.com",
+    "job": "bakobo-com",
+    "kind": "web"
+  },
+  "schema": {
+    "display": "schema.bakobo.com",
+    "job": "schema",
+    "kind": "web"
+  },
+  "cesrview": {
+    "display": "cesrview.bakobo.com",
+    "job": "cesrview",
+    "kind": "web"
+  }
+}
