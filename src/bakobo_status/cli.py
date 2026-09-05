@@ -31,6 +31,7 @@ from . import errors, rollup
 from .errors import StatusError
 from .incidents import SEVERITIES, STATES, Store, stamp
 from .metrics import Prometheus
+from . import site
 
 DEFAULT_ROOT = Path("incidents")
 DEFAULT_COMPONENTS = Path("components.json")
@@ -136,6 +137,10 @@ def build_parser() -> argparse.ArgumentParser:
         default=rollup.DEFAULT_STEP_SECONDS,
         help="uptime sampling step; must match the checks' frequency",
     )
+    builder = sub.add_parser("build", help="render the public site from incidents and history")
+    builder.add_argument("--out", type=Path, default=Path("_site"), help="output directory")
+    builder.add_argument("--history", type=Path, default=DEFAULT_HISTORY)
+
     roller.add_argument(
         "--backfill",
         action="store_true",
@@ -182,10 +187,33 @@ def run(argv, out) -> int:
     if args.command == "rollup":
         return _rollup(args, out)
 
+    if args.command == "build":
+        return _build(args, out)
+
     # Read through the store rather than off the path, so an absent file is the typed
     # "no such incident" with an instruction attached, not a traceback about a filename.
     store.read(args.id)
     print(store.path_for(args.id).read_text(encoding="utf-8"), end="", file=out)
+    return 0
+
+
+def _build(args, out, built_at=None) -> int:
+    """Render the page. Reads only files; reaches no network, by design.
+
+    The build must succeed when the estate is on fire, because that is when someone is about to
+    post an incident and needs the page republished. Anything it had to fetch would be a way for
+    that to fail.
+    """
+    components = json.loads(args.components_file.read_text(encoding="utf-8"))
+    if isinstance(components, list):
+        # The CLI's other commands accept a bare list of ids; the site needs display names, so a
+        # list degrades to using the id as its own label rather than refusing to build.
+        components = {c: {"display": c, "kind": "web"} for c in components}
+
+    html = site.render(components, args.history, args.root, built_at or dt.datetime.now(dt.timezone.utc))
+    args.out.mkdir(parents=True, exist_ok=True)
+    (args.out / "index.html").write_text(html, encoding="utf-8")
+    print(f"wrote {args.out / 'index.html'} ({len(html):,} bytes)", file=out)
     return 0
 
 
