@@ -12,6 +12,14 @@
 # 02:30 UTC rather than 00:05: the day's last probe lands at 23:45 and Grafana's ingestion is not
 # instantaneous, so querying at one minute past midnight reads a day that is not finished being
 # written. Two and a half hours is generous and costs nothing.
+#
+# A DEAD-MAN'S SWITCH GUARDS THIS JOB, for the reason ops.md §6 gives for backups: monitoring for
+# failure misses the case where the job stopped running, and that is the common case. A rollup that
+# silently stops looks exactly like a quiet month -- the page keeps serving, the bars simply stop
+# advancing -- and nobody finds out until someone opens it three weeks later and meets a hole that
+# can no longer be filled. GitHub makes this concrete rather than theoretical: scheduled workflows
+# are delayed or dropped under load, and GitHub disables schedules outright on a repository with no
+# activity for 60 days. Both are silent, and both are exactly what silence-based monitoring catches.
 
 name: Rollup
 
@@ -40,6 +48,11 @@ jobs:
   rollup:
     name: rollup
     runs-on: ubuntu-latest
+    # Job level, not step level: a step's own `env:` block is not in scope for that step's own
+    # `if:` condition, so the guards below would have read an empty string either way and the
+    # switch would have been silently unwired.
+    env:
+      HEALTHCHECK_URL: ${{ secrets.HEALTHCHECK_URL }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
@@ -74,6 +87,16 @@ jobs:
           echo "day=$day" >> "$GITHUB_OUTPUT"
           echo "Rolling up $day"
 
+      # Told before the work, so a job that dies mid-run is distinguishable from one that never
+      # started. healthchecks.io holds the run open until a success or failure ping arrives.
+      - name: tell the switch we started
+        if: env.HEALTHCHECK_URL != ''
+        run: curl -fsS -m 10 --retry 3 -o /dev/null "$HEALTHCHECK_URL/start"
+
+      - name: warn if the switch is not wired
+        if: env.HEALTHCHECK_URL == ''
+        run: echo "::warning::HEALTHCHECK_URL is unset, so this run is unmonitored. The rollup still runs -- losing days is worse than losing the guard -- but nothing will notice if it stops."
+
       - name: roll up
         env:
           GRAFANA_PROM_URL: ${{ vars.GRAFANA_PROM_URL }}
@@ -100,3 +123,18 @@ jobs:
           fi
           git commit -s -m "rollup: $DAY and any backfilled days"
           git push
+
+      # The body carries the run URL, so the alert healthchecks.io sends links straight to the
+      # failing run rather than to a name that has to be looked up.
+      - name: tell the switch how it went
+        if: always() && env.HEALTHCHECK_URL != ''
+        env:
+          RESULT: ${{ job.status }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          # `always()` so a failed rollup pings /fail rather than pinging nothing. Pinging nothing
+          # would still raise the alarm eventually, but only after the period elapsed -- hours
+          # later, and indistinguishable from the job never having run.
+          if [ "$RESULT" = "success" ]; then endpoint="$HEALTHCHECK_URL"; else endpoint="$HEALTHCHECK_URL/fail"; fi
+          curl -fsS -m 10 --retry 3 -o /dev/null --data-raw "$RESULT $RUN_URL" "$endpoint"
