@@ -55,13 +55,26 @@ class DayRecord:
     failures: int
 
     @property
+    def measured(self) -> bool:
+        """Whether anything was actually observed. Callers must not record a day that was not."""
+        return self.intervals > 0
+
+    @property
     def state(self) -> str:
         """What the bar is coloured, from the day's uptime.
 
         Thresholds rather than "any failure is red": a single failed interval in a day is 99.0%
         with a 15-minute period, and colouring that red would train the reader to ignore red. The
         boundaries are a judgement and are meant to be argued with, not derived.
+
+        A day with no intervals is NOT down, and that distinction is the difference between a
+        status page and a liar. Uptime is 0.0 both for a day nothing was measured and for a day
+        everything failed; only `intervals` tells them apart. The first real backfill got this
+        wrong in exactly the predictable way -- it recorded thirteen days from before the checks
+        existed, every one a red bar for an outage that never happened.
         """
+        if not self.intervals:
+            return "no-data"
         if self.uptime >= 0.999:
             return "operational"
         if self.uptime >= 0.95:

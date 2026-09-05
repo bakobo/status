@@ -236,6 +236,26 @@ def test_rollup_writes_a_day_for_every_component(estate):
     assert "operational" in out.getvalue()
 
 
+class EmptyClient:
+    """A stack with no data for the day -- before the checks existed."""
+
+    def query_range(self, promql, start, end, step):
+        return []
+
+    def query(self, promql, at):
+        return []
+
+
+def test_a_day_with_no_data_is_not_written_at_all(estate):
+    """It would otherwise be a red bar for an outage that never happened -- which is exactly what
+    the first real backfill published, before this was caught."""
+    out = io.StringIO()
+    code = cli._rollup(rollup_args(estate), out, client=EmptyClient())
+    assert code == 0
+    assert "no data, not recorded" in out.getvalue()
+    assert not list((estate / "history").glob("*.json"))
+
+
 def test_backfill_fills_the_window_and_plain_rollup_does_not(estate):
     """A week of failed runs must be repairable by one successful run; the window is finite, so a
     repair delayed past fourteen days is a repair that never happens."""
