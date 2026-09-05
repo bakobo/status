@@ -60,3 +60,9 @@ ID_TAKEN = "e.state.conflict.incident-id.f"
 # --- our own house -------------------------------------------------------------------------
 
 CORRUPT_INCIDENT = "e.self.corrupt.incident.f"
+CORRUPT_HISTORY = "e.self.corrupt.history.f"
+
+# --- a system we depend on that did not deliver ---------------------------------------------
+
+METRICS_UNREACHABLE = "e.env.metrics.unavailable.r"
+METRICS_REFUSED = "e.env.metrics.rejected.f"

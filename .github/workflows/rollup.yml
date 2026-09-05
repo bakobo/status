@@ -1,0 +1,102 @@
+# Roll yesterday into the durable history, and backfill anything the retention window still holds.
+#
+# The deadline is real and it is the reason this job exists at all: Grafana Cloud's free tier keeps
+# metrics for 14 days, so a day not captured before its fourteenth birthday is gone permanently
+# (infra this.i @2oxu5757). Nothing downstream can reconstruct it.
+#
+# Which is why this does NOT roll up only yesterday. It asks the history which days inside the
+# window are still missing and does those too, so a week of failed runs is repaired by the first
+# successful one rather than leaving a permanent hole. The cost is a few extra queries against a
+# read-only endpoint.
+#
+# 02:30 UTC rather than 00:05: the day's last probe lands at 23:45 and Grafana's ingestion is not
+# instantaneous, so querying at one minute past midnight reads a day that is not finished being
+# written. Two and a half hours is generous and costs nothing.
+
+name: Rollup
+
+on:
+  schedule:
+    - cron: "30 2 * * *"
+  # Manual runs exist for backfilling after an outage of this job, and take a date so that a person
+  # repairing a hole says which one rather than getting yesterday again.
+  workflow_dispatch:
+    inputs:
+      date:
+        description: "UTC day to roll up (YYYY-MM-DD). Defaults to yesterday."
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  # Two rollups writing the same history file would race on the commit, and the loser's day is not
+  # retried. Serialise rather than retry.
+  group: rollup
+  cancel-in-progress: false
+
+jobs:
+  rollup:
+    name: rollup
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
+        with:
+          enable-cache: true
+
+      - name: sync
+        run: uv sync --frozen
+
+      - name: choose the day
+        id: day
+        env:
+          REQUESTED: ${{ inputs.date }}
+        run: |
+          set -euo pipefail
+          # Quoted, and read from the environment rather than interpolated into the script, because
+          # workflow_dispatch input is user-controlled text.
+          if [ -n "$REQUESTED" ]; then
+            day="$REQUESTED"
+          else
+            day="$(date -u -d 'yesterday' +%F)"
+          fi
+          # Validated before it goes anywhere near a shell or a commit message. This value
+          # originates in workflow_dispatch input, which is user-controlled text, and it is
+          # interpolated downstream; a strict shape here is what makes that safe rather than
+          # merely unlikely. Fails closed -- an unparseable date rolls up nothing.
+          case "$day" in
+            [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) ;;
+            *) echo "::error::'$day' is not a YYYY-MM-DD date."; exit 1 ;;
+          esac
+          echo "day=$day" >> "$GITHUB_OUTPUT"
+          echo "Rolling up $day"
+
+      - name: roll up
+        env:
+          GRAFANA_PROM_URL: ${{ vars.GRAFANA_PROM_URL }}
+          GRAFANA_PROM_USER: ${{ vars.GRAFANA_PROM_USER }}
+          GRAFANA_PROM_TOKEN: ${{ secrets.GRAFANA_PROM_TOKEN }}
+          DAY: ${{ steps.day.outputs.day }}
+        run: uv run bakobo-status rollup --date "$DAY" --backfill
+
+      - name: commit the day
+        env:
+          DAY: ${{ steps.day.outputs.day }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add history/
+          # Nothing to commit is a legitimate outcome -- a re-run of a day already captured -- and
+          # is reported rather than swallowed. `git diff --cached --quiet` distinguishes it from a
+          # failure, which is the check-for-the-benign-case rule that infra's workflow gate asks
+          # for instead of `|| true`.
+          if git diff --cached --quiet; then
+            echo "No change: $DAY was already recorded."
+            exit 0
+          fi
+          git commit -s -m "rollup: $DAY and any backfilled days"
+          git push
