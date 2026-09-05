@@ -1,0 +1,103 @@
+{
+  "component": "witness-br",
+  "days": {
+    "2026-08-23": {
+      "uptime": 0.0,
+      "reachability": 0.0,
+      "intervals": 0,
+      "executions": 0,
+      "failures": 0
+    },
+    "2026-08-24": {
+      "uptime": 0.0,
+      "reachability": 0.0,
+      "intervals": 0,
+      "executions": 0,
+      "failures": 0
+    },
+    "2026-08-25": {
+      "uptime": 0.0,
+      "reachability": 0.0,
+      "intervals": 0,
+      "executions": 0,
+      "failures": 0
+    },
+    "2026-08-26": {
+      "uptime": 0.0,
+      "reachability": 0.0,
+      "intervals": 0,
+      "executions": 0,
+      "failures": 0
+    },
+    "2026-08-27": {
+      "uptime": 0.0,
+      "reachability": 0.0,
+      "intervals": 0,
+      "executions": 0,
+      "failures": 0
+    },
+    "2026-08-28": {
+      "uptime": 0.0,
+      "reachability": 0.0,
+      "intervals": 0,
+      "executions": 0,
+      "failures": 0
+    },
+    "2026-08-29": {
+      "uptime": 0.0,
+      "reachability": 0.0,
+      "intervals": 0,
+      "executions": 0,
+      "failures": 0
+    },
+    "2026-08-30": {
+      "uptime": 0.0,
+      "reachability": 0.0,
+      "intervals": 0,
+      "executions": 0,
+      "failures": 0
+    },
+    "2026-08-31": {
+      "uptime": 0.0,
+      "reachability": 0.0,
+      "intervals": 0,
+      "executions": 0,
+      "failures": 0
+    },
+    "2026-09-01": {
+      "uptime": 0.0,
+      "reachability": 0.0,
+      "intervals": 0,
+      "executions": 0,
+      "failures": 0
+    },
+    "2026-09-02": {
+      "uptime": 0.0,
+      "reachability": 0.0,
+      "intervals": 0,
+      "executions": 0,
+      "failures": 0
+    },
+    "2026-09-03": {
+      "uptime": 0.0,
+      "reachability": 0.0,
+      "intervals": 0,
+      "executions": 0,
+      "failures": 0
+    },
+    "2026-09-04": {
+      "uptime": 0.0,
+      "reachability": 0.0,
+      "intervals": 0,
+      "executions": 0,
+      "failures": 0
+    },
+    "2026-09-05": {
+      "uptime": 1.0,
+      "reachability": 1.0,
+      "intervals": 4,
+      "executions": 9,
+      "failures": 0
+    }
+  }
+}
