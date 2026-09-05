@@ -32,6 +32,20 @@ Four properties are deliberate and worth not undoing.
 
 **An unknown component is refused.** `components.json` is generated from the monitoring root's `components` output, so every id here has a probe behind it. A typo would otherwise put a row on the public page that can never go green, sitting next to rows that mean something.
 
+## The uptime history
+
+```
+bakobo-status rollup --date 2026-09-05 --backfill
+```
+
+Two numbers per component per day, because they answer different questions. **Uptime** is interval-based — the fraction of time points in which *at least one* probe succeeded, which is what the coloured bar shows and why three probe locations were chosen: one probe's own network trouble must not be published as an outage. **Reachability** is execution-based, the fraction of all probe executions that succeeded. Uptime 1.0 with reachability 0.67 means the service was up throughout and one region could not reach it — real, worth knowing, and invisible in the bar.
+
+Both definitions are Grafana's own, so the page agrees with the Synthetics UI a reader may have open beside it.
+
+**This is the piece with a deadline.** Grafana Cloud's free tier retains metrics for 14 days, so a day not captured before its fourteenth birthday is gone — not slowly, not with a bigger query, not at all. That is why the nightly job passes `--backfill`: it asks the history which days inside the window are still missing and does those too, so a week of failed runs is repaired by the first successful run rather than leaving a permanent hole.
+
+It also means the record's shape is a one-way door. `DayRecord` carries uptime, reachability, intervals, executions and failures — enough for a 90-day bar and its hover. Latency percentiles and per-probe detail are *not* in it and cannot be added retroactively. If they are ever wanted, that has to be decided inside the fortnight.
+
 ## The incident format
 
 ```
@@ -68,8 +82,8 @@ uv run pytest
 
 Stated plainly so nobody reads this README as a description of a working service.
 
-- **The site generator.** Incidents parse; nothing renders them to HTML yet.
+- **The site generator.** Incidents and history parse; nothing renders them to HTML yet.
 - **Publication.** The target is Cloudflare Pages, from GitHub Actions, on a subdomain so that `bakobo.com`'s zone stays at Namecheap.
-- **The nightly uptime rollup** (`@2oxu5757`) — Grafana Cloud's free tier retains metrics for 14 days, so the 90-day bars have to be rolled up into this repository each night or they cannot exist.
+- **A dead-man's switch on the rollup.** `ops.md` §6 wants backup freshness monitored by silence, and this job has the same shape: a rollup that stops running looks exactly like a quiet month until someone opens the page in three weeks and finds a hole. healthchecks.io, once its ping URLs exist.
 - **A check that `components.json` is still what the monitoring root outputs.** It is committed so the tool works without a tofu toolchain, and a committed copy of generated data drifts. Until that check exists, the drift is caught by nobody.
-- **A `workflow_dispatch` workflow** wrapping the same commands, so an incident can be posted from a phone.
+- **A `workflow_dispatch` workflow** wrapping the incident commands, so an incident can be posted from a phone.

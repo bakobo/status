@@ -21,15 +21,20 @@ severity is an edit rather than a revert of something already published.
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import json
+import os
 import sys
 from pathlib import Path
 
+from . import errors, rollup
 from .errors import StatusError
 from .incidents import SEVERITIES, STATES, Store, stamp
+from .metrics import Prometheus
 
 DEFAULT_ROOT = Path("incidents")
 DEFAULT_COMPONENTS = Path("components.json")
+DEFAULT_HISTORY = Path("history")
 
 
 def load_components(path: Path) -> tuple[str, ...]:
@@ -115,6 +120,28 @@ def build_parser() -> argparse.ArgumentParser:
     shower = sub.add_parser("show", help="print one incident as stored")
     shower.add_argument("id")
 
+    roller = sub.add_parser(
+        "rollup",
+        help="roll a day of probe results into the durable history (metrics expire at 14 days)",
+    )
+    # Yesterday rather than today, and not defaulted here: a date the caller did not choose is how
+    # a scheduled job quietly rolls up a partial day and then never revisits it.
+    roller.add_argument("--date", required=True, help="the UTC day to roll up, YYYY-MM-DD")
+    roller.add_argument(
+        "--history", type=Path, default=DEFAULT_HISTORY, help="where day records are kept"
+    )
+    roller.add_argument(
+        "--step",
+        type=int,
+        default=rollup.DEFAULT_STEP_SECONDS,
+        help="uptime sampling step; must match the checks' frequency",
+    )
+    roller.add_argument(
+        "--backfill",
+        action="store_true",
+        help="also roll up any earlier day still inside the retention window that has no record",
+    )
+
     return parser
 
 
@@ -152,10 +179,93 @@ def run(argv, out) -> int:
         print("\n\n".join(_describe(i) for i in found), file=out)
         return 0
 
+    if args.command == "rollup":
+        return _rollup(args, out)
+
     # Read through the store rather than off the path, so an absent file is the typed
     # "no such incident" with an instruction attached, not a traceback about a filename.
     store.read(args.id)
     print(store.path_for(args.id).read_text(encoding="utf-8"), end="", file=out)
+    return 0
+
+
+def _prometheus_from_env(environ) -> Prometheus:
+    """Credentials come from the environment, never from a flag.
+
+    A token in a flag lands in shell history and in the CI log line that echoes the command. The
+    three names match what the workflow sets, so there is one spelling to get right.
+    """
+    missing = [
+        name
+        for name in ("GRAFANA_PROM_URL", "GRAFANA_PROM_USER", "GRAFANA_PROM_TOKEN")
+        if not environ.get(name)
+    ]
+    if missing:
+        raise StatusError(
+            "e.self.config.metrics-credentials.f",
+            "The metrics credentials are not set.",
+            f"Missing: {', '.join(missing)}. GRAFANA_PROM_URL is the Prometheus instance URL and "
+            "GRAFANA_PROM_USER is its numeric id, both from the Cloud Portal; GRAFANA_PROM_TOKEN "
+            "is the `status-rollup` access policy token.",
+        )
+    return Prometheus(
+        environ["GRAFANA_PROM_URL"], environ["GRAFANA_PROM_USER"], environ["GRAFANA_PROM_TOKEN"]
+    )
+
+
+def _rollup(args, out, client=None, environ=None) -> int:
+    """Roll one day for every component, and say what was written.
+
+    Every component is attempted even when one fails, because a day is only recoverable for
+    fourteen days and abandoning six components over one failure spends five of those recoveries
+    for nothing. The exit status still reports the failure.
+    """
+    environ = os.environ if environ is None else environ
+    try:
+        day = dt.date.fromisoformat(args.date)
+    except ValueError as exc:
+        raise StatusError(
+            errors.MALFORMED_ID,
+            "That is not a date.",
+            f"'{args.date}' is not YYYY-MM-DD. The rollup takes an explicit UTC day so that a "
+            "scheduled run cannot silently roll up a partial one.",
+        ) from exc
+
+    known = load_components(args.components_file)
+    client = client or _prometheus_from_env(environ)
+    history = rollup.History(args.history)
+
+    failed = []
+    for component in known:
+        # The named day first, then anything still missing inside the window. Backfilling is what
+        # makes a week of failed runs repairable by one successful run rather than a permanent
+        # hole -- and the window is finite, so a repair delayed past fourteen days is a repair
+        # that never happens.
+        days = [day]
+        if args.backfill:
+            days += [d for d in history.missing_days(component, through=day) if d != day]
+
+        for target in sorted(days):
+            try:
+                record = rollup.roll_day(client, component, target, step=args.step)
+            except StatusError as exc:
+                print(f"{component} {target}: FAILED {exc.code} — {exc.detail}", file=out)
+                failed.append(f"{component}@{target}")
+                continue
+            history.record(component, target, record)
+            print(
+                f"{component} {target}: uptime {record.uptime:.4f} "
+                f"reachability {record.reachability:.4f} "
+                f"({record.intervals} intervals, {record.failures}/{record.executions} failed) "
+                f"→ {record.state}",
+                file=out,
+            )
+
+    if failed:
+        # Named rather than counted. The next run must know which days to retry, and the window
+        # to do it in is finite.
+        print(f"{len(failed)} not rolled up: {', '.join(failed)}", file=out)
+        return 1
     return 0
 
 
