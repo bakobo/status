@@ -339,3 +339,66 @@ def test_rollup_reaches_the_command_through_run(estate, monkeypatch):
         "--components-file", str(estate / "components.json"),
         "rollup", "--date", "2026-09-05", "--history", str(estate / "history"),
     ], out) == 0
+
+
+# --- build ---------------------------------------------------------------------------------------
+
+def build_args(estate, **over):
+    args = cli.build_parser().parse_args([
+        "--root", str(estate / "incidents"),
+        "--components-file", str(estate / "components.json"),
+        "build", "--out", str(estate / "_site"), "--history", str(estate / "history"),
+    ])
+    for k, v in over.items():
+        setattr(args, k, v)
+    return args
+
+
+def test_build_writes_one_self_contained_page(estate):
+    out = io.StringIO()
+    assert cli._build(build_args(estate), out) == 0
+    page = (estate / "_site" / "index.html").read_text()
+    assert page.startswith("<!doctype html>")
+    assert "Bakobo status" in page
+    assert "wrote " in out.getvalue()
+
+
+def test_build_accepts_the_bare_id_list_the_other_commands_use(estate):
+    """components.json is a map in production, but the incident commands accept a bare list. The
+    build degrades to using the id as its own label rather than refusing, because a page that
+    will not render is worse than one with plain labels."""
+    cli._build(build_args(estate), io.StringIO())
+    page = (estate / "_site" / "index.html").read_text()
+    for component in KNOWN:
+        assert component in page
+
+
+def test_build_reaches_no_network(estate, monkeypatch):
+    """It must succeed while the estate is on fire -- that is when someone needs it republished."""
+    def forbidden(*a, **k):
+        raise AssertionError("the build opened a socket")
+
+    monkeypatch.setattr(cli.Prometheus, "query", forbidden)
+    monkeypatch.setattr(cli.Prometheus, "query_range", forbidden)
+    assert cli._build(build_args(estate), io.StringIO()) == 0
+
+
+def test_build_reaches_the_command_through_run(estate):
+    out = io.StringIO()
+    assert cli.run([
+        "--root", str(estate / "incidents"),
+        "--components-file", str(estate / "components.json"),
+        "build", "--out", str(estate / "_site"), "--history", str(estate / "history"),
+    ], out) == 0
+    assert (estate / "_site" / "index.html").is_file()
+
+
+def test_build_uses_display_names_when_components_json_is_the_generated_map(estate):
+    """The production file is the monitoring root's `components` output — a map carrying display
+    names, so the page reads 'DE witness — de.wit.bakobo.com' rather than 'witness-de'."""
+    (estate / "components.json").write_text(json.dumps({
+        "witness-de": {"display": "DE witness — de.wit.bakobo.com", "kind": "witness"},
+    }), encoding="utf-8")
+    cli._build(build_args(estate), io.StringIO())
+    page = (estate / "_site" / "index.html").read_text()
+    assert "DE witness — de.wit.bakobo.com" in page

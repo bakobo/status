@@ -1,0 +1,74 @@
+# Build the page and publish it to Cloudflare Pages.
+#
+# On every push to main, which means posting an incident republishes the page within a minute or
+# two -- and that is the point. The page is a snapshot rather than a live view (site.py says so on
+# the page itself), so freshness has to come from rebuilding at the moments freshness matters:
+# when someone declares an incident, updates one, resolves one, or when the nightly rollup adds a
+# day.
+#
+# Cloudflare **Pages**, not Workers, against Cloudflare's own advice that new projects should use
+# Workers. A Workers Custom Domain requires an active Cloudflare zone and cannot attach to a
+# hostname carrying an existing CNAME elsewhere, so status.bakobo.com on Workers would force
+# bakobo.com's nameservers to Cloudflare -- the migration infra's @kur5pd refused on evidence.
+# Pages serves a subdomain from external DNS. See infra @xxbjzkw5 for the full argument and the
+# trigger for revisiting it.
+#
+# The deploy credential is scoped to `Cloudflare Pages: Edit` and nothing else. Verified rather
+# than assumed: it reads Pages projects and is refused on account members. That matters because
+# this repository is public, so the token lives in a public repository's secrets, and DNS is
+# exactly what it must not be able to touch.
+
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # A build racing another build would publish whichever finished last rather than whichever is
+  # newest -- and during an incident the newest is the one that matters.
+  group: deploy
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    name: deploy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
+        with:
+          enable-cache: true
+
+      - name: sync
+        run: uv sync --frozen
+
+      # The build reads files and reaches no network, deliberately: it has to succeed while the
+      # estate is on fire, which is when someone needs the page republished.
+      - name: build
+        run: uv run bakobo-status build --out _site
+
+      - name: the page is not empty
+        run: |
+          set -euo pipefail
+          # A zero-byte or truncated index.html would deploy cleanly and serve a blank status page,
+          # which is worse than serving a stale one. Cheapest possible guard against that.
+          test -s _site/index.html
+          grep -q "Bakobo status" _site/index.html
+          echo "index.html is $(wc -c < _site/index.html) bytes"
+
+      - name: publish
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        # `npx wrangler` rather than a marketplace action: the deploy is one command, and an action
+        # here would be a third party with access to a token in a public repository's secrets.
+        # Pinned by exact version so the tool cannot change under us between deploys.
+        run: npx --yes wrangler@4.129.0 pages deploy _site --project-name=bakobo-status --branch=main
