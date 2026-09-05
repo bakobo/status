@@ -95,6 +95,19 @@ def test_uptime_and_reachability_diverge_when_one_region_fails():
     assert record.failures == 3
 
 
+def test_a_day_with_no_data_is_not_down():
+    """The difference between a status page and a liar. Uptime is 0.0 both when nothing was
+    measured and when everything failed; only `intervals` separates them, and the first real
+    backfill published thirteen red bars for outages that never happened by ignoring that."""
+    nothing = summarize([], [], [], [])
+    assert nothing.state == "no-data"
+    assert not nothing.measured
+
+    everything_failed = summarize(matrix(0, 0, 0), vector(0.0), vector(9), vector(0))
+    assert everything_failed.state == "down"
+    assert everything_failed.measured
+
+
 def test_a_day_with_no_data_is_zero_intervals_rather_than_a_crash():
     """A day before the check existed. Legitimately empty, and the caller tells it apart by
     `intervals` rather than by uptime, which is 0.0 either way."""

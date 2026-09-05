@@ -252,6 +252,13 @@ def _rollup(args, out, client=None, environ=None) -> int:
                 print(f"{component} {target}: FAILED {exc.code} — {exc.detail}", file=out)
                 failed.append(f"{component}@{target}")
                 continue
+            if not record.measured:
+                # Nothing ran that day -- before the check existed, or a gap Grafana has already
+                # forgotten. Recording it would publish a red bar for an outage that never
+                # happened, which is the one thing a status page must not do. It stays "missing",
+                # so later runs retry it cheaply until it ages out of the window on its own.
+                print(f"{component} {target}: no data, not recorded", file=out)
+                continue
             history.record(component, target, record)
             print(
                 f"{component} {target}: uptime {record.uptime:.4f} "
