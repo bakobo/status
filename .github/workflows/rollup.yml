@@ -105,6 +105,29 @@ jobs:
           DAY: ${{ steps.day.outputs.day }}
         run: uv run bakobo-status rollup --date "$DAY" --backfill
 
+      # Read the artifact back before claiming success, rather than trusting the exit code.
+      #
+      # The rollup exits 0 when every query succeeded and every one returned nothing -- which is
+      # what a metric rename, a deleted check or a silently emptied stack looks like. The job would
+      # then ping the switch healthy while the history quietly stopped advancing, which is the
+      # exact failure the switch exists to catch, arriving through the switch's own blind spot.
+      #
+      # Borrowed from the backup job, which pings only after reading its snapshot back out of the
+      # restic repository. Same shape, four lines: ask the store whether the thing is actually
+      # there.
+      - name: the day was actually recorded
+        env:
+          DAY: ${{ steps.day.outputs.day }}
+        run: |
+          set -euo pipefail
+          if ! grep -lF "\"$DAY\"" history/*.json >/dev/null 2>&1; then
+            echo "::error::The rollup exited cleanly but no component recorded $DAY. Every query"
+            echo "::error::returned empty, which is what a renamed metric or a deleted check looks"
+            echo "::error::like. Not pinging the switch healthy."
+            exit 1
+          fi
+          echo "$DAY recorded for $(grep -lF "\"$DAY\"" history/*.json | wc -l) component(s)."
+
       - name: commit the day
         env:
           DAY: ${{ steps.day.outputs.day }}
