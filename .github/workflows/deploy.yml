@@ -55,6 +55,11 @@ jobs:
   deploy:
     name: deploy
     runs-on: ubuntu-latest
+    # Job level rather than step level, for the reason the rollup job records: a step's own `env:`
+    # block is not in scope for that step's own `if:`, so a guard written there reads an empty
+    # string either way and the switch is silently unwired.
+    env:
+      DEPLOY_HEALTHCHECK_URL: ${{ secrets.DEPLOY_HEALTHCHECK_URL }}
     # `types: [completed]` fires on a failed rollup as well as a successful one, and a rollup that
     # failed committed nothing -- so there is nothing new to publish and the run would be noise on
     # a day someone is already reading an alert. Every other trigger passes unconditionally.
@@ -101,3 +106,34 @@ jobs:
         # here would be a third party with access to a token in a public repository's secrets.
         # Pinned by exact version so the tool cannot change under us between deploys.
         run: npx --yes wrangler@4.129.0 pages deploy _site --project-name=bakobo-status --branch=main
+
+      # A DEAD-MAN'S SWITCH, for the reason the rollup has one and for one this job earned on its
+      # own. The rollup's argument is ops.md §6's: monitoring for failure misses the case where the
+      # job stopped running, which is the common case. This job proved the argument -- it did not
+      # fail, it was never triggered, so there was no red run to notice and nothing in the Actions
+      # tab looked wrong. The page went stale for forty hours and was caught by a person opening it
+      # and reading the footer.
+      #
+      # Period wants to be a little over a day: the nightly rollup at 02:30 UTC now guarantees a
+      # deploy every day even when nobody pushes, so silence for longer than that means the chain
+      # from schedule to rollup to trigger to publish is broken somewhere, and which link broke is
+      # a question for after the alert.
+      #
+      # This does NOT catch a deploy that succeeds while publishing a stale page -- a green run is
+      # a green run. That gap is what the page reporting its own build age would close, and it is
+      # not closed here.
+      - name: tell the switch how it went
+        if: always() && env.DEPLOY_HEALTHCHECK_URL != ''
+        env:
+          RESULT: ${{ job.status }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          # `always()` so a failed publish pings /fail immediately rather than waiting out the
+          # period, which would arrive hours later and be indistinguishable from never having run.
+          if [ "$RESULT" = "success" ]; then endpoint="$DEPLOY_HEALTHCHECK_URL"; else endpoint="$DEPLOY_HEALTHCHECK_URL/fail"; fi
+          curl -fsS -m 10 --retry 3 -o /dev/null --data-raw "$RESULT $RUN_URL" "$endpoint"
+
+      - name: warn if the switch is not wired
+        if: always() && env.DEPLOY_HEALTHCHECK_URL == ''
+        run: echo "::warning::DEPLOY_HEALTHCHECK_URL is unset, so nothing will notice if this workflow stops being triggered. The deploy still runs -- publishing beats guarding it -- but the failure it just recovered from would recur unobserved."
