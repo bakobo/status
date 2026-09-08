@@ -171,14 +171,56 @@ def test_the_snapshot_query_is_the_rollup_s_own_expression():
 
 # --- the file ------------------------------------------------------------------------------------
 
+def payload(**components):
+    """The shape site.publish emits: readings plus their rendering, in one file."""
+    return {
+        "taken_at": NOON.isoformat(),
+        "stale_after_seconds": 2700,
+        "banner": {"state": "operational", "colour": "#0ca30c", "headline": "ok", "evidence": ""},
+        "components": components,
+    }
+
+
+def rendered(reading, **extra):
+    """One component's entry: the four Snapshot fields, plus presentation the reader never parses."""
+    from dataclasses import asdict
+    return {**asdict(reading), "state": "operational", "colour": "#0ca30c",
+            "glyph": "\u25cf", "label": "Operational", "tip": "...", **extra}
+
+
 def test_the_snapshot_round_trips(tmp_path):
     now = Now(tmp_path / "now.json")
-    now.write(NOON, {"witness-de": snap(), "bakobo-com": snap(current=0)})
+    now.write(payload(**{"witness-de": rendered(snap()),
+                         "bakobo-com": rendered(snap(current=0))}))
 
     assert now.read()["taken_at"] == NOON.isoformat()
     back = now.snapshots()
     assert back["witness-de"] == snap()
     assert back["bakobo-com"].current == 0
+
+
+def test_the_presentation_half_of_the_payload_is_ignored_when_reading():
+    """One artifact serves the build and the browser. The reader takes the four fields a reading
+    has and is indifferent to everything the renderer added beside them."""
+    from bakobo_status.snapshot import Now as N
+    import json as j, tempfile, pathlib as pl
+    path = pl.Path(tempfile.mkdtemp()) / "now.json"
+    path.write_text(j.dumps(payload(**{"a": rendered(snap(), extra_field_from_the_future=1)})))
+    assert N(path).snapshots()["a"] == snap()
+
+
+def test_a_component_with_no_reading_is_skipped_rather_than_constructed(tmp_path):
+    """publish() emits an entry for every component the page shows, including ones it could not
+    measure -- as_of null. A Snapshot with no timestamp cannot say whether it is stale and would
+    raise at the moment the page most needs to render."""
+    path = tmp_path / "now.json"
+    Now(path).write(payload(**{
+        "measured": rendered(snap()),
+        "unmeasured": {"current": None, "as_of": None, "intervals": 0, "up": 0,
+                       "state": "no-data", "colour": "#eee", "glyph": "\u00b7",
+                       "label": "No data", "tip": "..."},
+    }))
+    assert list(Now(path).snapshots()) == ["measured"]
 
 
 def test_an_absent_snapshot_is_not_an_error(tmp_path):
@@ -199,8 +241,10 @@ def test_a_corrupt_snapshot_is_an_error(tmp_path):
     assert "not the history" in caught.value.detail
 
 
-def test_the_snapshot_is_written_sorted_and_indented(tmp_path):
-    path = Now(tmp_path / "now.json").write(NOON, {"z": snap(), "a": snap()})
-    written = json.loads(path.read_text())
-    assert list(written["components"]) == ["a", "z"]
+def test_the_snapshot_is_written_exactly_as_composed(tmp_path):
+    """write() is deliberately dumb: this file is PUT into KV and served to browsers verbatim, so
+    anything it rearranged would be a difference between what was decided and what is read."""
+    given = payload(**{"z": rendered(snap()), "a": rendered(snap())})
+    path = Now(tmp_path / "now.json").write(given)
+    assert json.loads(path.read_text()) == given
     assert path.read_text().endswith("\n")

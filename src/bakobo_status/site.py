@@ -30,8 +30,8 @@ import json
 from pathlib import Path
 
 from .incidents import Store
-from .rollup import state_for_uptime
-from .snapshot import INTERVALS_PER_DAY, Now
+from .rollup import DEFAULT_STEP_SECONDS, state_for_uptime
+from .snapshot import INTERVALS_PER_DAY, STALE_AFTER_INTERVALS, Now
 
 # Fixed status steps from the house data-viz standard. Never themed, never reused for anything
 # else, and deliberately not drawn from Bakobo's brand ramp -- a brand hue standing in for
@@ -155,6 +155,64 @@ footer { margin-top: 3rem; color: var(--muted); font-size: .78rem;
          border-top: 1px solid var(--border); padding-top: 1rem; }
 """
 
+# The page's only script. It fetches the snapshot from this same origin and swaps in verdicts that
+# were already decided in Python (see `publish`), so nothing here knows what "up" means.
+#
+# It is an UPGRADE, never a requirement. The document that arrives is already correct as of its
+# build and renders fully without this running: a reader with JavaScript off, a reader whose fetch
+# is blocked, and a reader on a page served while the endpoint is down all see the built-in state
+# and its honest timestamp. Every failure path below leaves the document exactly as it arrived,
+# which is why there is no error handling that writes anything to the page.
+#
+# The freshness gate runs HERE rather than at write time, and it is the only arithmetic in the
+# file. A payload written at 09:00 and read at 14:00 still says "operational"; only the reader's
+# clock can catch that. A clock that is badly wrong fails toward grey rather than toward a
+# confident green, which is the direction to fail in.
+SCRIPT = """
+(async function () {
+  try {
+    var res = await fetch('/now', { cache: 'no-store' });
+    if (!res.ok) return;
+    var data = await res.json();
+    var gate = (data.stale_after_seconds || 2700) * 1000;
+
+    function fresh(iso) { return iso && (Date.now() - Date.parse(iso)) < gate; }
+
+    var anyFresh = Object.keys(data.components || {}).some(function (id) {
+      return fresh(data.components[id].as_of);
+    });
+    if (!anyFresh) return;   // nothing newer than the build; leave the document alone
+
+    var b = data.banner;
+    if (b) {
+      document.getElementById('banner').style.borderLeftColor = b.colour;
+      document.getElementById('banner-swatch').style.background = b.colour;
+      document.getElementById('banner-headline').textContent = b.headline;
+      document.getElementById('banner-evidence').textContent = b.evidence;
+    }
+
+    Object.keys(data.components).forEach(function (id) {
+      var c = data.components[id];
+      // Matched by name, so a component added or removed since the build is skipped rather than
+      // shifting every cell after it and painting the wrong service red.
+      var cell = document.querySelector('[data-now="' + CSS.escape(id) + '"]');
+      var row = document.querySelector('[data-now-state="' + CSS.escape(id) + '"]');
+      if (!cell || !row) return;
+      var stale = !fresh(c.as_of);
+      cell.style.background = stale ? 'var(--empty)' : c.colour;
+      var tip = cell.querySelector('.tip');
+      if (tip && !stale) tip.innerHTML = tip.innerHTML.split('<br>')[0] + '<br>' + c.tip;
+      row.innerHTML = '<span class="sw" style="background:' +
+        (stale ? 'var(--empty)' : c.colour) + '"></span> ' +
+        (stale ? '\\u00b7 No data' : c.glyph + ' ' + c.label);
+    });
+  } catch (e) {
+    // Deliberately silent and deliberately empty. The page is already correct; a reader looking at
+    // a status page during an outage is the last person who should be shown a second failure.
+  }
+})();
+"""
+
 
 def _esc(value) -> str:
     return html.escape(str(value), quote=True)
@@ -236,32 +294,48 @@ def _clock(iso: str) -> str:
     return dt.datetime.fromisoformat(iso).strftime("%H:%M UTC")
 
 
-def _today_bar(day: dt.date, snap, now) -> str:
+def today_detail(snap, now) -> str:
+    """The tooltip for today's cell, as a fragment of HTML.
+
+    Split out from the cell because the browser needs the same sentence when it refreshes the page
+    from the snapshot endpoint. Written once here rather than twice -- once in Python and once in
+    JavaScript -- for the same reason the thresholds live in one place: two copies of a sentence
+    about an outage will eventually describe two different outages.
+    """
+    if snap is None:
+        return "Nothing has been measured. No harvest has run against this component yet."
+    if snap.is_stale(now):
+        return (
+            f"Measurement stopped at {_esc(_clock(snap.as_of))}, and nothing has arrived since.<br>"
+            "This is not a report that anything is down — it is the monitoring that went quiet."
+        )
+    failed = snap.intervals - snap.up
+    verdict = "up right now" if snap.current else "DOWN right now"
+    return (
+        f"Today so far — {verdict}, as of {_esc(_clock(snap.as_of))}<br>"
+        f"{snap.intervals} of {INTERVALS_PER_DAY} intervals measured, {failed} failed<br>"
+        f"Projects to {snap.projected_uptime() * 100:.2f}% if it stays this way"
+    )
+
+
+def _today_bar(component_id: str, day: dt.date, snap, now) -> str:
     """The newest cell, which is today and is the only one still moving.
 
     Marked with a class so it is visibly the day in progress rather than a completed one. A cell
     that looked identical to its ninety neighbours would be claiming today is finished and scored,
     when what it actually carries is a projection that will move again before midnight.
+
+    `data-now` is the hook the page's own script updates in place from /now. It carries the
+    component id rather than an index, so a component added or removed between the build and the
+    fetch mismatches by name and is skipped, instead of silently shifting every cell after it by
+    one and painting the wrong service red.
     """
     state = today_state(snap, now)
-    if snap is None:
-        detail = "Nothing has been measured. No harvest has run against this component yet."
-    elif snap.is_stale(now):
-        detail = (
-            f"Measurement stopped at {_esc(_clock(snap.as_of))}, and nothing has arrived since.<br>"
-            "This is not a report that anything is down — it is the monitoring that went quiet."
-        )
-    else:
-        failed = snap.intervals - snap.up
-        verdict = "up right now" if snap.current else "DOWN right now"
-        detail = (
-            f"Today so far — {verdict}, as of {_esc(_clock(snap.as_of))}<br>"
-            f"{snap.intervals} of {INTERVALS_PER_DAY} intervals measured, {failed} failed<br>"
-            f"Projects to {snap.projected_uptime() * 100:.2f}% if it stays this way"
-        )
     return (
-        f'<div class="day today" tabindex="0" style="background:{STATE_COLOURS[state]}">'
-        f'<span class="tip"><strong>{_esc(day.isoformat())} — today</strong><br>{detail}</span></div>'
+        f'<div class="day today" tabindex="0" data-now="{_esc(component_id)}" '
+        f'style="background:{STATE_COLOURS[state]}">'
+        f'<span class="tip"><strong>{_esc(day.isoformat())} — today</strong><br>'
+        f"{today_detail(snap, now)}</span></div>"
     )
 
 
@@ -298,9 +372,11 @@ def _component_block(component_id: str, display: str, rows, snap, now) -> str:
     return f"""<section class="component">
   <div class="row">
     <span class="name">{_esc(display)}</span>
-    <span class="state">{_swatch(state)} {STATE_GLYPHS[state]} {STATE_LABELS[state]}</span>
+    <span class="state" data-now-state="{_esc(component_id)}">{_swatch(state)} {STATE_GLYPHS[state]}
+      {STATE_LABELS[state]}</span>
   </div>
-  <div class="strip">{''.join(_bar(d, r) for d, r in rows[:-1])}{_today_bar(rows[-1][0], snap, now)}</div>
+  <div class="strip">{''.join(_bar(d, r) for d, r in rows[:-1])}
+    {_today_bar(component_id, rows[-1][0], snap, now)}</div>
   <div class="scale"><span>{WINDOW_DAYS} days ago</span><span>{_esc(summary)}</span>
     <span>today</span></div>
   <details><summary>Show the numbers for {_esc(display)}</summary>{_table(rows)}</details>
@@ -376,6 +452,51 @@ def banner(open_incidents, snaps, now, total) -> tuple[str, str, str]:
     return "operational", "All systems operational", f"All {total} probed and responding as of {at}."
 
 
+def publish(components: dict, snaps: dict, open_incidents, now) -> dict:
+    """The payload served at /now and consumed by the page's own script.
+
+    Every verdict in here is already decided. The browser sets a colour and swaps a sentence; it
+    owns no threshold, no projection and no notion of what "up" means. That is the whole point of
+    precomputing: the moment the page fetches its data at runtime, rendering logic wants to migrate
+    into JavaScript, and `state_for_uptime` acquires a twin that drifts. Deciding here keeps one
+    definition, in the language the strip and the banner are already rendered from.
+
+    The ONE thing the browser must decide for itself is freshness, because only the browser knows
+    what time it is when the page is being read. A payload written at 09:00 and read at 14:00 says
+    "operational" and is worthless; the reader's clock is the only thing that can catch that. So
+    the gate travels with the payload as a number of seconds rather than as a rule, and the
+    arithmetic on the other side is a subtraction.
+    """
+    state, headline, evidence = banner(open_incidents, snaps, now, len(components))
+    return {
+        "taken_at": now.isoformat(),
+        "stale_after_seconds": STALE_AFTER_INTERVALS * DEFAULT_STEP_SECONDS,
+        "banner": {
+            "state": state,
+            "colour": STATE_COLOURS[state],
+            "headline": headline,
+            "evidence": evidence,
+        },
+        "components": {
+            cid: {
+                "state": (cstate := today_state(snaps.get(cid), now)),
+                "colour": STATE_COLOURS[cstate],
+                "glyph": STATE_GLYPHS[cstate],
+                "label": STATE_LABELS[cstate],
+                "tip": today_detail(snaps.get(cid), now),
+                # The raw reading travels too. It costs a few bytes and it is what anyone else
+                # consuming this -- a customer's dashboard, a future sparkline -- would actually
+                # want, rather than our rendering of it.
+                "as_of": snaps[cid].as_of if cid in snaps else None,
+                "current": snaps[cid].current if cid in snaps else None,
+                "intervals": snaps[cid].intervals if cid in snaps else 0,
+                "up": snaps[cid].up if cid in snaps else 0,
+            }
+            for cid in sorted(components)
+        },
+    }
+
+
 def render(components: dict, history_root: Path, incidents_root: Path, built_at, now_path=None) -> str:
     store = Store(incidents_root)
     all_incidents = store.all()
@@ -421,9 +542,10 @@ def render(components: dict, history_root: Path, incidents_root: Path, built_at,
 <h1>Bakobo status</h1>
 <p class="sub">Whether the things Bakobo runs are working.</p>
 
-<div class="banner" style="border-left-color:{STATE_COLOURS[state]}">
-  {_swatch(state)} <strong>{_esc(headline)}</strong>
-  <span class="state">{_esc(evidence)}</span>
+<div class="banner" id="banner" style="border-left-color:{STATE_COLOURS[state]}">
+  <span class="sw" id="banner-swatch" style="background:{STATE_COLOURS[state]}"></span>
+  <strong id="banner-headline">{_esc(headline)}</strong>
+  <span class="state" id="banner-evidence">{_esc(evidence)}</span>
 </div>
 
 <h2>Current incidents</h2>
@@ -436,6 +558,7 @@ def render(components: dict, history_root: Path, incidents_root: Path, built_at,
 <h2>Recent incidents</h2>
 {past_html}
 
+<script>{SCRIPT}</script>
 <footer>
 <p>Each day is measured every 15 minutes from three probe locations. A day counts as up in an
 interval when at least one probe succeeded, so one probe's own network trouble is not reported

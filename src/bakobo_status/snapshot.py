@@ -147,11 +147,15 @@ class Now:
     def __init__(self, path: Path) -> None:
         self.path = Path(path)
 
-    def write(self, taken_at: dt.datetime, components: dict) -> Path:
-        payload = {
-            "taken_at": taken_at.isoformat(),
-            "components": {k: asdict(v) for k, v in sorted(components.items())},
-        }
+    def write(self, payload: dict) -> Path:
+        """Write the payload as given.
+
+        Deliberately dumb. The file this writes is the SAME file that gets PUT into KV and served
+        to browsers, so it carries the rendered verdicts as well as the raw readings, and it is
+        composed by `site.publish` rather than here. One artifact for both consumers is the only
+        way the page built from it and the page refreshed from it cannot disagree; two files
+        assembled by two code paths would differ on the day it mattered.
+        """
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
         return self.path
@@ -179,4 +183,17 @@ class Now:
         return data
 
     def snapshots(self) -> dict:
-        return {k: Snapshot(**v) for k, v in self.read().get("components", {}).items()}
+        """Just the readings, out of a payload that also carries their rendering.
+
+        Takes only the fields a Snapshot has and ignores the rest, so the presentation half of the
+        payload can grow without this needing to know. An entry with no `as_of` is a component the
+        harvest could not measure -- it is skipped rather than constructed, because a Snapshot with
+        no timestamp cannot answer whether it is stale and would raise at the moment the page most
+        needs to render.
+        """
+        fields = ("current", "as_of", "intervals", "up")
+        return {
+            k: Snapshot(**{f: v[f] for f in fields})
+            for k, v in self.read().get("components", {}).items()
+            if v.get("as_of") is not None
+        }
