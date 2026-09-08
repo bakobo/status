@@ -37,6 +37,24 @@ from .errors import StatusError
 DEFAULT_STEP_SECONDS = 900
 
 
+def state_for_uptime(uptime: float) -> str:
+    """The colour, from a fraction. The one place the thresholds are written down.
+
+    Thresholds rather than "any failure is red": a single failed interval in a day is 99.0% with a
+    fifteen-minute period, and colouring that red would train the reader to ignore red. The
+    boundaries are a judgement and are meant to be argued with, not derived.
+
+    Shared with the page and with the current-status projection because three copies of a boundary
+    is three chances for the strip to disagree with the banner about the same estate, and the
+    reader has no way to tell which of them is lying.
+    """
+    if uptime >= 0.999:
+        return "operational"
+    if uptime >= 0.95:
+        return "degraded"
+    return "down"
+
+
 @dataclass(frozen=True)
 class DayRecord:
     """One component, one UTC day.
@@ -63,23 +81,13 @@ class DayRecord:
     def state(self) -> str:
         """What the bar is coloured, from the day's uptime.
 
-        Thresholds rather than "any failure is red": a single failed interval in a day is 99.0%
-        with a 15-minute period, and colouring that red would train the reader to ignore red. The
-        boundaries are a judgement and are meant to be argued with, not derived.
-
         A day with no intervals is NOT down, and that distinction is the difference between a
         status page and a liar. Uptime is 0.0 both for a day nothing was measured and for a day
         everything failed; only `intervals` tells them apart. The first real backfill got this
         wrong in exactly the predictable way -- it recorded thirteen days from before the checks
         existed, every one a red bar for an outage that never happened.
         """
-        if not self.intervals:
-            return "no-data"
-        if self.uptime >= 0.999:
-            return "operational"
-        if self.uptime >= 0.95:
-            return "degraded"
-        return "down"
+        return state_for_uptime(self.uptime) if self.intervals else "no-data"
 
 
 def uptime_query(job: str) -> str:
