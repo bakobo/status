@@ -30,6 +30,8 @@ import json
 from pathlib import Path
 
 from .incidents import Store
+from .rollup import state_for_uptime
+from .snapshot import INTERVALS_PER_DAY, Now
 
 # Fixed status steps from the house data-viz standard. Never themed, never reused for anything
 # else, and deliberately not drawn from Bakobo's brand ramp -- a brand hue standing in for
@@ -66,6 +68,10 @@ SEVERITY_STATE = {
 }
 
 WINDOW_DAYS = 90
+
+# Beside the history rather than inside it, because it is not one. `history/` holds days that can
+# never be recomputed; this file is replaced every quarter hour and losing it costs nothing.
+DEFAULT_NOW = Path("now.json")
 
 STYLE = """
 :root {
@@ -113,6 +119,10 @@ a { color: var(--accent); }
   flex: 1 1 0; min-width: 2px; height: 26px; border-radius: 2px; position: relative;
 }
 .day:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* Today is still moving, and is marked so it does not read as a completed, scored day. Two
+   channels rather than one: a slight taper plus a shortened height, so the distinction survives
+   for a reader who cannot separate this cell's colour from its neighbour's. */
+.day.today { height: 30px; margin-top: -2px; border-radius: 2px 2px 5px 5px; }
 .day .tip {
   display: none; position: absolute; bottom: calc(100% + 6px); left: 50%;
   transform: translateX(-50%); background: var(--card); color: var(--text);
@@ -178,10 +188,28 @@ def window(days: dict, through: dt.date, span: int = WINDOW_DAYS) -> list[tuple[
 def day_state(record) -> str:
     if not record or not record.get("intervals"):
         return "no-data"
-    uptime = record["uptime"]
-    if uptime >= 0.999:
-        return "operational"
-    return "degraded" if uptime >= 0.95 else "down"
+    return state_for_uptime(record["uptime"])
+
+
+def today_state(snap, now) -> str:
+    """The newest cell: today, projected forward from what is happening right now.
+
+    Three outcomes rather than two. Absent means the harvest has never run or nothing has been
+    measured since midnight -- the first quarter hour of a UTC day, legitimately. Stale means the
+    harvest stopped: the last thing it saw may be hours old, and projecting from it would paint
+    today green on the strength of a measurement from another hour. Both render as absence, which
+    is the honest colour for "we do not currently know", and both say which one they are in the
+    tooltip.
+
+    Grey rather than red for a stopped harvest, deliberately. The common causes -- an Actions
+    outage, an expired token, a renamed metric -- have nothing to do with whether the estate is up,
+    so red would report a monitoring failure as an outage. That the harvest stopped is worth an
+    alarm to the operator, and it gets one from the job's dead-man's switch rather than from the
+    colour of a bar a stranger is reading.
+    """
+    if snap is None or snap.is_stale(now):
+        return "no-data"
+    return state_for_uptime(snap.projected_uptime())
 
 
 def _bar(day: dt.date, record) -> str:
@@ -204,6 +232,39 @@ def _bar(day: dt.date, record) -> str:
     )
 
 
+def _clock(iso: str) -> str:
+    return dt.datetime.fromisoformat(iso).strftime("%H:%M UTC")
+
+
+def _today_bar(day: dt.date, snap, now) -> str:
+    """The newest cell, which is today and is the only one still moving.
+
+    Marked with a class so it is visibly the day in progress rather than a completed one. A cell
+    that looked identical to its ninety neighbours would be claiming today is finished and scored,
+    when what it actually carries is a projection that will move again before midnight.
+    """
+    state = today_state(snap, now)
+    if snap is None:
+        detail = "Nothing has been measured. No harvest has run against this component yet."
+    elif snap.is_stale(now):
+        detail = (
+            f"Measurement stopped at {_esc(_clock(snap.as_of))}, and nothing has arrived since.<br>"
+            "This is not a report that anything is down — it is the monitoring that went quiet."
+        )
+    else:
+        failed = snap.intervals - snap.up
+        verdict = "up right now" if snap.current else "DOWN right now"
+        detail = (
+            f"Today so far — {verdict}, as of {_esc(_clock(snap.as_of))}<br>"
+            f"{snap.intervals} of {INTERVALS_PER_DAY} intervals measured, {failed} failed<br>"
+            f"Projects to {snap.projected_uptime() * 100:.2f}% if it stays this way"
+        )
+    return (
+        f'<div class="day today" tabindex="0" style="background:{STATE_COLOURS[state]}">'
+        f'<span class="tip"><strong>{_esc(day.isoformat())} — today</strong><br>{detail}</span></div>'
+    )
+
+
 def _table(rows) -> str:
     measured = [(d, r) for d, r in rows if r and r.get("intervals")]
     if not measured:
@@ -219,9 +280,16 @@ def _table(rows) -> str:
     )
 
 
-def _component_block(component_id: str, display: str, rows) -> str:
-    latest = next((r for _, r in reversed(rows) if r and r.get("intervals")), None)
-    state = day_state(latest)
+def _component_block(component_id: str, display: str, rows, snap, now) -> str:
+    # The component's headline state is today's, not the newest completed day's. Reading it off the
+    # history was defensible while the history was all there was; with a snapshot in hand, saying
+    # "Operational" from yesterday's record while today is measurably down would be the page
+    # telling a stranger something untrue with the evidence to know better sitting beside it.
+    #
+    # And when today is unknown it says "No data" rather than falling back to the newest completed
+    # day. The fallback is the tempting version and it is the stale-confident-green failure with
+    # extra steps: a harvest that stopped on Tuesday would keep the row green through Friday.
+    state = today_state(snap, now)
     measured = [r for _, r in rows if r and r.get("intervals")]
     average = sum(r["uptime"] for r in measured) / len(measured) if measured else None
     counted = f"{len(measured)} day" + ("" if len(measured) == 1 else "s")
@@ -232,7 +300,7 @@ def _component_block(component_id: str, display: str, rows) -> str:
     <span class="name">{_esc(display)}</span>
     <span class="state">{_swatch(state)} {STATE_GLYPHS[state]} {STATE_LABELS[state]}</span>
   </div>
-  <div class="strip">{''.join(_bar(d, r) for d, r in rows)}</div>
+  <div class="strip">{''.join(_bar(d, r) for d, r in rows[:-1])}{_today_bar(rows[-1][0], snap, now)}</div>
   <div class="scale"><span>{WINDOW_DAYS} days ago</span><span>{_esc(summary)}</span>
     <span>today</span></div>
   <details><summary>Show the numbers for {_esc(display)}</summary>{_table(rows)}</details>
@@ -254,32 +322,81 @@ def _incident_block(incident) -> str:
 </article>"""
 
 
-def banner(open_incidents) -> tuple[str, str]:
-    """The headline, from open incidents only.
+def banner(open_incidents, snaps, now, total) -> tuple[str, str, str]:
+    """The headline: state, claim, and the evidence the claim rests on.
 
-    Deliberately not from the uptime history. The history's newest day may be up to a day old, and
-    a green banner sourced from stale data is the precise failure a status page exists to prevent.
-    An open incident is a statement someone made on purpose and is current by construction.
+    THIS is the answer to "are you up", and the strip below is not. A reader arriving mid-outage
+    wants one sentence, and the bars can only ever give them a day-shaped one -- an outage starting
+    at 23:50 barely moves today's projection, because there is not enough day left for it to.
+
+    It used to say "All systems operational" from the absence of an incident file, which was an
+    inference from silence rather than a measurement: nothing alerts, incidents are declared by
+    hand, and an outage at three in the morning produces silence identical to a healthy night. So
+    the sentence was worth very little, and a reader who did not trust it looked down at the strip
+    for corroboration and found the newest cell grey. That is the whole reason this work happened.
+
+    Order of authority, and each layer overrides the one below it:
+
+    An open incident wins outright. It is a statement a person made on purpose, it carries a cause
+    and a remedy, and no probe result is worth more than that.
+
+    Otherwise the measurement speaks, and it is allowed to say the estate is down. This is the part
+    that is new.
+
+    Otherwise -- no incident and no usable measurement -- it says so, rather than falling back to
+    "All systems operational". That fallback is what the old version did every minute of its life,
+    and it is a green light generated by the absence of information.
     """
-    if not open_incidents:
-        return "operational", "All systems operational"
-    worst = max(open_incidents, key=lambda i: list(SEVERITY_STATE).index(i.severity))
-    state = SEVERITY_STATE[worst.severity]
-    plural = "incident" if len(open_incidents) == 1 else "incidents"
-    return state, f"{len(open_incidents)} open {plural}"
+    if open_incidents:
+        worst = max(open_incidents, key=lambda i: list(SEVERITY_STATE).index(i.severity))
+        plural = "incident" if len(open_incidents) == 1 else "incidents"
+        return (
+            SEVERITY_STATE[worst.severity],
+            f"{len(open_incidents)} open {plural}",
+            "Declared by hand — the detail is below.",
+        )
+
+    live = {c: s for c, s in snaps.items() if not s.is_stale(now)}
+    if not live:
+        # Named for what it is. "Status unknown" is a worse headline than "operational" to write
+        # and a better one to read, and the reader is told which of the two possible worlds they
+        # are in: nobody has measured, versus the measuring stopped.
+        seen = max((s.as_of for s in snaps.values()), default=None)
+        since = f"Nothing measured since {_clock(seen)}." if seen else "No measurement has run yet."
+        return "no-data", "Current status unknown", f"{since} This is not a report of an outage."
+
+    down = sorted(c for c, s in live.items() if not s.current)
+    at = _clock(max(s.as_of for s in live.values()))
+    if down:
+        return "down", f"{len(down)} of {total} not responding", f"{', '.join(down)}, as of {at}."
+    if len(live) < total:
+        return "operational", f"{len(live)} of {total} responding", (
+            f"As of {at}. The rest have no current measurement."
+        )
+    return "operational", "All systems operational", f"All {total} probed and responding as of {at}."
 
 
-def render(components: dict, history_root: Path, incidents_root: Path, built_at) -> str:
+def render(components: dict, history_root: Path, incidents_root: Path, built_at, now_path=None) -> str:
     store = Store(incidents_root)
     all_incidents = store.all()
     open_incidents = [i for i in all_incidents if not i.is_resolved]
     recent_closed = [i for i in all_incidents if i.is_resolved][:10]
 
-    state, headline = banner(open_incidents)
+    # Narrowed to components the page actually shows. A snapshot holding a component that has since
+    # been removed from the registry must not be able to put "1 of 7 not responding" on the banner
+    # for a row nobody can see.
+    snaps = {c: s for c, s in Now(now_path or DEFAULT_NOW).snapshots().items() if c in components}
+    state, headline, evidence = banner(open_incidents, snaps, built_at, len(components))
     today = built_at.date()
 
     blocks = "".join(
-        _component_block(cid, meta.get("display", cid), window(load_history(history_root, cid), today))
+        _component_block(
+            cid,
+            meta.get("display", cid),
+            window(load_history(history_root, cid), today),
+            snaps.get(cid),
+            built_at,
+        )
         for cid, meta in sorted(components.items(), key=lambda kv: (kv[1].get("kind", ""), kv[0]))
     )
     legend = "".join(
@@ -306,6 +423,7 @@ def render(components: dict, history_root: Path, incidents_root: Path, built_at)
 
 <div class="banner" style="border-left-color:{STATE_COLOURS[state]}">
   {_swatch(state)} <strong>{_esc(headline)}</strong>
+  <span class="state">{_esc(evidence)}</span>
 </div>
 
 <h2>Current incidents</h2>
@@ -322,6 +440,11 @@ def render(components: dict, history_root: Path, incidents_root: Path, built_at)
 <p>Each day is measured every 15 minutes from three probe locations. A day counts as up in an
 interval when at least one probe succeeded, so one probe's own network trouble is not reported
 here as an outage. Hover a bar for that day's figures, or open the numbers under any component.</p>
+<p>The last bar is today, still in progress, and it is scored as if the rest of the day looks like
+right now — so it goes red while an outage is happening and settles to the day's true figure once
+it ends. It can never return to green after a failed interval. Late in a UTC day an outage moves it
+very little, because there is not enough day left for it to matter; the banner above, not the bars,
+is what answers whether the estate is up at this moment.</p>
 <p><strong>This page is a snapshot, not a live view.</strong> It is rebuilt whenever an incident is
 posted and once nightly, and it is published on infrastructure separate from everything it reports
 on. Built {_esc(built_at.strftime('%Y-%m-%d %H:%M UTC'))}.</p>
