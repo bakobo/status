@@ -40,6 +40,14 @@ on:
   workflow_run:
     workflows: [Rollup]
     types: [completed]
+  # Every fifteen minutes, because the page now carries a claim about NOW and a claim about now
+  # goes stale on a clock rather than on an event. Fifteen matches the probe period exactly: the
+  # underlying truth does not change more often than that, so a tighter schedule would buy nothing
+  # and a looser one would spend the freshness the harvest exists to provide. Past forty-five
+  # minutes without a rebuild the page stops asserting and goes grey by itself, which is the floor
+  # this schedule is chosen to stay well clear of.
+  schedule:
+    - cron: "*/15 * * * *"
   workflow_dispatch:
 
 permissions:
@@ -84,8 +92,33 @@ jobs:
       - name: sync
         run: uv sync --frozen
 
-      # The build reads files and reaches no network, deliberately: it has to succeed while the
-      # estate is on fire, which is when someone needs the page republished.
+      # The one step here that touches a network, and the only one allowed to fail without failing
+      # the deploy.
+      #
+      # It harvests each component's current state so the newest cell of the strip and the banner
+      # have something to say about now. Without it both fall back to "we do not currently know",
+      # which is honest and useless -- the page's whole job is the question "are you up", and until
+      # this ran the answer came from the absence of an incident file rather than from a probe.
+      #
+      # `continue-on-error` is load-bearing and is what keeps the property the build was given at
+      # the start: the page must still publish while the estate is on fire, because that is exactly
+      # when someone is posting an incident. If Grafana is unreachable -- or is itself the thing
+      # that is broken -- the snapshot is simply absent, the page renders today grey and says why,
+      # and the incident still reaches readers. A hard failure here would take the status page down
+      # for the same reason the status page exists.
+      #
+      # Timed out at three minutes because the client's own timeout is 60s per query and there are
+      # seven components: a hung endpoint would otherwise hold the publish for seven minutes.
+      - name: harvest what is true right now
+        continue-on-error: true
+        timeout-minutes: 3
+        env:
+          GRAFANA_PROM_URL: ${{ vars.GRAFANA_PROM_URL }}
+          GRAFANA_PROM_USER: ${{ vars.GRAFANA_PROM_USER }}
+          GRAFANA_PROM_TOKEN: ${{ secrets.GRAFANA_PROM_TOKEN }}
+        run: uv run bakobo-status now
+
+      # The build itself still reads files and reaches no network, deliberately.
       - name: build
         run: uv run bakobo-status build --out _site
 
@@ -114,14 +147,17 @@ jobs:
       # tab looked wrong. The page went stale for forty hours and was caught by a person opening it
       # and reading the footer.
       #
-      # Period wants to be a little over a day: the nightly rollup at 02:30 UTC now guarantees a
-      # deploy every day even when nobody pushes, so silence for longer than that means the chain
-      # from schedule to rollup to trigger to publish is broken somewhere, and which link broke is
-      # a question for after the alert.
+      # Period wants to be about an hour, now that the schedule above rebuilds every fifteen
+      # minutes. It was a little over a day when the nightly rollup was the only thing guaranteeing
+      # a deploy; leaving it there would mean a stopped schedule went unreported for twenty-three
+      # hours, while the page had already stopped asserting anything after forty-five minutes.
+      # Tie the guard to the freshness the page actually promises, not to the slowest thing that
+      # triggers it.
       #
-      # This does NOT catch a deploy that succeeds while publishing a stale page -- a green run is
-      # a green run. That gap is what the page reporting its own build age would close, and it is
-      # not closed here.
+      # This does NOT catch a deploy that succeeds while publishing a page whose harvest failed --
+      # the harvest step is `continue-on-error` and a green run is a green run. That case is
+      # visible to readers instead: the page says its status is unknown and names the time it last
+      # measured, which is the honest thing to show a stranger and a poor way to page an operator.
       - name: tell the switch how it went
         if: always() && env.DEPLOY_HEALTHCHECK_URL != ''
         env:

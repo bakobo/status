@@ -4,3 +4,7 @@ __pycache__/
 .pytest_cache/
 .coverage
 _site/
+
+# Written by `bakobo-status now` at deploy time and never committed. It is the one artifact here
+# that is not the record: replaced every quarter hour, and losing it costs nothing.
+now.json
