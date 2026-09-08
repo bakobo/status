@@ -27,7 +27,7 @@ import os
 import sys
 from pathlib import Path
 
-from . import errors, rollup
+from . import errors, rollup, snapshot
 from .errors import StatusError
 from .incidents import SEVERITIES, STATES, Store, stamp
 from .metrics import Prometheus
@@ -36,6 +36,7 @@ from . import site
 DEFAULT_ROOT = Path("incidents")
 DEFAULT_COMPONENTS = Path("components.json")
 DEFAULT_HISTORY = Path("history")
+DEFAULT_NOW = site.DEFAULT_NOW
 
 
 def load_components(path: Path) -> tuple[str, ...]:
@@ -137,9 +138,23 @@ def build_parser() -> argparse.ArgumentParser:
         default=rollup.DEFAULT_STEP_SECONDS,
         help="uptime sampling step; must match the checks' frequency",
     )
+    nower = sub.add_parser(
+        "now", help="harvest every component's current state into the rolling snapshot"
+    )
+    nower.add_argument(
+        "--snapshot", type=Path, default=DEFAULT_NOW, help="where the rolling snapshot is written"
+    )
+    nower.add_argument(
+        "--step",
+        type=int,
+        default=rollup.DEFAULT_STEP_SECONDS,
+        help="uptime sampling step; must match the checks' frequency",
+    )
+
     builder = sub.add_parser("build", help="render the public site from incidents and history")
     builder.add_argument("--out", type=Path, default=Path("_site"), help="output directory")
     builder.add_argument("--history", type=Path, default=DEFAULT_HISTORY)
+    builder.add_argument("--snapshot", type=Path, default=DEFAULT_NOW)
 
     roller.add_argument(
         "--backfill",
@@ -187,6 +202,9 @@ def run(argv, out) -> int:
     if args.command == "rollup":
         return _rollup(args, out)
 
+    if args.command == "now":
+        return _now(args, out)
+
     if args.command == "build":
         return _build(args, out)
 
@@ -210,7 +228,13 @@ def _build(args, out, built_at=None) -> int:
         # list degrades to using the id as its own label rather than refusing to build.
         components = {c: {"display": c, "kind": "web"} for c in components}
 
-    html = site.render(components, args.history, args.root, built_at or dt.datetime.now(dt.timezone.utc))
+    html = site.render(
+        components,
+        args.history,
+        args.root,
+        built_at or dt.datetime.now(dt.timezone.utc),
+        now_path=args.snapshot,
+    )
     args.out.mkdir(parents=True, exist_ok=True)
     (args.out / "index.html").write_text(html, encoding="utf-8")
     print(f"wrote {args.out / 'index.html'} ({len(html):,} bytes)", file=out)
@@ -300,6 +324,53 @@ def _rollup(args, out, client=None, environ=None) -> int:
         # Named rather than counted. The next run must know which days to retry, and the window
         # to do it in is finite.
         print(f"{len(failed)} not rolled up: {', '.join(failed)}", file=out)
+        return 1
+    return 0
+
+
+def _now(args, out, client=None, environ=None, at=None) -> int:
+    """Harvest every component's current state into the rolling snapshot.
+
+    Unlike the rollup, a failure here costs nothing permanent -- the next run is fifteen minutes
+    away and the data does not expire in the meantime. So this is the one place in the tool where
+    partial success is genuinely fine, and the snapshot is written with whatever was gathered: six
+    components measured and one refused is a better page than seven components grey because of the
+    seventh. The exit status still reports it, because a component failing every run for a day is
+    a broken check rather than a blip.
+
+    A component that returns nothing is OMITTED rather than written as down. There is no probe
+    result that means "down" and no probe result at all; conflating them here would put a red row
+    on the page for a check that was deleted.
+    """
+    environ = os.environ if environ is None else environ
+    known = load_components(args.components_file)
+    client = client or _prometheus_from_env(environ)
+    at = at or dt.datetime.now(dt.timezone.utc)
+
+    gathered, failed = {}, []
+    for component in known:
+        try:
+            reading = snapshot.probe_now(client, component, at, step=args.step)
+        except StatusError as exc:
+            print(f"{component}: FAILED {exc.code} — {exc.detail}", file=out)
+            failed.append(component)
+            continue
+        if reading is None:
+            print(f"{component}: nothing measured, omitted", file=out)
+            continue
+        gathered[component] = reading
+        print(
+            f"{component}: {'up' if reading.current else 'DOWN'} as of {reading.as_of} "
+            f"({reading.intervals} intervals today, {reading.intervals - reading.up} failed) "
+            f"→ projects {reading.projected_uptime() * 100:.2f}%",
+            file=out,
+        )
+
+    path = snapshot.Now(args.snapshot).write(at, gathered)
+    print(f"wrote {path} ({len(gathered)}/{len(known)} components)", file=out)
+
+    if failed:
+        print(f"{len(failed)} not measured: {', '.join(failed)}", file=out)
         return 1
     return 0
 
