@@ -142,13 +142,14 @@ def test_the_banner_takes_the_worst_open_severity(estate):
 
 # --- rendering ----------------------------------------------------------------------------------
 
-def test_the_page_is_self_contained(estate):
+def test_the_page_loads_nothing_from_anywhere_else(estate):
     """It is read when other things are broken, so every external request is a way for it to be
-    broken too."""
+    broken too. The page now carries one script, and the property has to be restated rather than
+    dropped: nothing is LOADED from another origin, and the single request the script makes is to
+    this page's own."""
     page = site.render(COMPONENTS, estate / "history", estate / "incidents", BUILT)
-    assert "<script" not in page
     assert "<link" not in page          # no stylesheet, no font, no preconnect
-    assert "src=" not in page           # no image, no iframe, no embed
+    assert "src=" not in page           # no image, no iframe, no embed, and no external script
     assert "@import" not in page
     assert "http://" not in page
 
@@ -156,6 +157,24 @@ def test_the_page_is_self_contained(estate):
     # rather than a resource the page fetches. Nothing has to resolve for the page to render.
     assert page.count("https://") == 1
     assert "https://bakobo.com/.well-known/security.txt" in page
+
+    # One inline script, and the only thing it fetches is same-origin and relative.
+    assert page.count("<script>") == 1
+    assert "fetch('/now'" in page
+
+
+def test_the_page_is_complete_before_the_script_runs(estate):
+    """The script is an upgrade, never a requirement. A reader with JavaScript off, or whose fetch
+    is blocked, or who loads the page while the snapshot endpoint is down, must still get the state
+    the page was built with -- so the state has to be IN the document rather than injected into
+    it."""
+    page = site.render(COMPONENTS, estate / "history", estate / "incidents", BUILT,
+                       now_path=written_now(estate, current=0, intervals=48, up=47))
+    before_script = page.split("<script>")[0]
+
+    assert "1 of 2 not responding" in before_script
+    assert "DOWN right now" in before_script
+    assert site.STATE_COLOURS["down"] in before_script
 
 
 def test_every_component_appears_with_a_text_state(estate):
@@ -232,7 +251,8 @@ def test_history_for_an_absent_file_is_empty(tmp_path):
 
 def written_now(tmp, **kw):
     path = tmp / "now.json"
-    Now(path).write(BUILT, {"witness-de": snap(**kw), "bakobo-com": snap()})
+    snaps = {"witness-de": snap(**kw), "bakobo-com": snap()}
+    Now(path).write(site.publish(COMPONENTS, snaps, [], BUILT))
     return path
 
 
@@ -279,16 +299,77 @@ def test_a_component_with_no_reading_is_absent_rather_than_down(estate):
 
 def test_a_snapshot_naming_a_retired_component_cannot_reach_the_banner(estate):
     """A row nobody can see must not be able to put "1 of 2 not responding" above the fold."""
+    # Hand-built rather than via publish(), because publish only emits components the page shows.
+    # The case under test is a payload written BEFORE a component left components.json, which is
+    # exactly the payload a fifteen-minute writer can be holding when the registry changes.
     path = estate / "now.json"
-    Now(path).write(BUILT, {"witness-de": snap(), "bakobo-com": snap(),
-                            "gone-last-week": snap(current=0)})
+    payload = site.publish(COMPONENTS, {"witness-de": snap(), "bakobo-com": snap()}, [], BUILT)
+    payload["components"]["gone-last-week"] = dict(payload["components"]["witness-de"],
+                                                   current=0, state="down")
+    Now(path).write(payload)
     page = site.render(COMPONENTS, estate / "history", estate / "incidents", BUILT, now_path=path)
     assert "All systems operational" in page
     assert "gone-last-week" not in page
 
 
-def test_the_page_still_reaches_no_network_with_a_snapshot(estate):
+def test_the_page_still_reaches_no_other_origin_with_a_snapshot(estate):
     page = site.render(COMPONENTS, estate / "history", estate / "incidents", BUILT,
                        now_path=written_now(estate))
-    assert "<script" not in page
+    assert "src=" not in page
     assert page.count("https://") == 1
+
+
+# --- the published payload -----------------------------------------------------------------------
+
+def test_publish_decides_every_verdict_so_the_browser_decides_none():
+    """The moment the page fetches its data at runtime, rendering logic wants to migrate into
+    JavaScript and state_for_uptime acquires a twin that drifts. Everything the script needs is a
+    colour and a sentence."""
+    payload = site.publish(COMPONENTS, {"witness-de": snap(), "bakobo-com": snap()}, [], BUILT)
+
+    assert payload["banner"]["headline"] == "All systems operational"
+    assert payload["banner"]["colour"] == site.STATE_COLOURS["operational"]
+    de = payload["components"]["witness-de"]
+    assert de["state"] == "operational"
+    assert de["colour"] == site.STATE_COLOURS["operational"]
+    assert de["label"] == "Operational"
+    assert "up right now" in de["tip"]
+
+
+def test_publish_carries_the_freshness_gate_rather_than_the_rule():
+    """Only the browser knows what time it is when the page is read, so it has to apply the gate
+    itself -- but the gate's VALUE is decided here."""
+    payload = site.publish(COMPONENTS, {}, [], BUILT)
+    assert payload["stale_after_seconds"] == 2700
+
+
+def test_publish_reports_a_component_it_has_no_reading_for():
+    """Absent, not down. A component missing from the snapshot must not become a red row."""
+    payload = site.publish(COMPONENTS, {"witness-de": snap()}, [], BUILT)
+    missing = payload["components"]["bakobo-com"]
+    assert missing["state"] == "no-data"
+    assert missing["as_of"] is None
+    assert (missing["intervals"], missing["up"], missing["current"]) == (0, 0, None)
+
+
+def test_publish_and_the_page_agree_about_the_same_estate():
+    """The static render and the payload that will overwrite it must not disagree, or the page
+    changes its mind a second after loading for no reason a reader could understand."""
+    snaps = {"witness-de": snap(current=0, intervals=48, up=47), "bakobo-com": snap()}
+    payload = site.publish(COMPONENTS, snaps, [], BUILT)
+    assert payload["banner"]["headline"] == site.banner([], snaps, BUILT, 2)[1]
+    for cid, entry in payload["components"].items():
+        assert entry["state"] == site.today_state(snaps.get(cid), BUILT)
+        assert entry["tip"] == site.today_detail(snaps.get(cid), BUILT)
+
+
+def test_the_script_hooks_exist_for_every_component(estate):
+    """The script matches cells by component id. A hook that is not emitted is a cell that silently
+    never refreshes."""
+    page = site.render(COMPONENTS, estate / "history", estate / "incidents", BUILT,
+                       now_path=written_now(estate))
+    for cid in COMPONENTS:
+        assert f'data-now="{cid}"' in page
+        assert f'data-now-state="{cid}"' in page
+    for hook in ("banner", "banner-swatch", "banner-headline", "banner-evidence"):
+        assert f'id="{hook}"' in page
