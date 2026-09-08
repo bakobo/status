@@ -8,6 +8,7 @@ playbook gets an exit status it can branch on.
 
 from __future__ import annotations
 
+import datetime as dt
 import io
 import json
 
@@ -402,3 +403,89 @@ def test_build_uses_display_names_when_components_json_is_the_generated_map(esta
     cli._build(build_args(estate), io.StringIO())
     page = (estate / "_site" / "index.html").read_text()
     assert "DE witness — de.wit.bakobo.com" in page
+
+
+# --- now ---------------------------------------------------------------------------------------
+
+class NowClient:
+    """Answers the one range query `now` asks, or raises for a named component."""
+
+    def __init__(self, value="1", fail_for=(), empty_for=()):
+        self.value = value
+        self.fail_for = set(fail_for)
+        self.empty_for = set(empty_for)
+
+    def query_range(self, promql, start, end, step):
+        for job in self.fail_for:
+            if f'job="{job}"' in promql:
+                raise StatusError("e.env.metrics.unavailable.r", "Down.", "Grafana is unreachable.")
+        for job in self.empty_for:
+            if f'job="{job}"' in promql:
+                return []
+        return [{"metric": {}, "values": [[end.timestamp(), self.value]]}]
+
+
+def now_args(estate):
+    return cli.build_parser().parse_args([
+        "--root", str(estate / "incidents"),
+        "--components-file", str(estate / "components.json"),
+        "now", "--snapshot", str(estate / "now.json"),
+    ])
+
+
+AT = dt.datetime(2026, 9, 5, 12, 0, tzinfo=dt.timezone.utc)
+
+
+def test_now_writes_every_component_into_one_snapshot(estate):
+    out = io.StringIO()
+    code = cli._now(now_args(estate), out, client=NowClient(), at=AT)
+    assert code == 0
+
+    written = json.loads((estate / "now.json").read_text())
+    assert written["taken_at"] == AT.isoformat()
+    assert sorted(written["components"]) == ["bakobo-com", "witness-ca", "witness-de"]
+    assert "up as of" in out.getvalue()
+
+
+def test_now_records_a_component_that_is_not_answering(estate):
+    out = io.StringIO()
+    cli._now(now_args(estate), out, client=NowClient(value="0"), at=AT)
+    written = json.loads((estate / "now.json").read_text())
+    assert written["components"]["witness-de"]["current"] == 0
+    assert "DOWN as of" in out.getvalue()
+
+
+def test_a_component_with_no_samples_is_omitted_not_written_down(estate):
+    """No probe result is not a probe result meaning down. Writing it as down would put a red row
+    on the page for a check that was deleted."""
+    out = io.StringIO()
+    code = cli._now(now_args(estate), out, client=NowClient(empty_for={"witness-ca"}), at=AT)
+    assert code == 0
+    written = json.loads((estate / "now.json").read_text())
+    assert "witness-ca" not in written["components"]
+    assert "witness-ca: nothing measured, omitted" in out.getvalue()
+
+
+def test_one_refused_component_still_writes_the_other_six(estate):
+    """Unlike the rollup, nothing here expires -- but six components measured beats seven grey."""
+    out = io.StringIO()
+    code = cli._now(now_args(estate), out, client=NowClient(fail_for={"witness-ca"}), at=AT)
+    assert code == 1
+    written = json.loads((estate / "now.json").read_text())
+    assert sorted(written["components"]) == ["bakobo-com", "witness-de"]
+    assert "1 not measured: witness-ca" in out.getvalue()
+
+
+def test_now_needs_the_same_credentials_the_rollup_does(estate):
+    with pytest.raises(StatusError) as caught:
+        cli._now(now_args(estate), io.StringIO(), environ={})
+    assert caught.value.code == "e.self.config.metrics-credentials.f"
+
+
+def test_now_reaches_the_command_through_run(estate, monkeypatch):
+    monkeypatch.setattr(cli, "_now", lambda args, out: 0)
+    assert cli.run([
+        "--root", str(estate / "incidents"),
+        "--components-file", str(estate / "components.json"),
+        "now", "--snapshot", str(estate / "now.json"),
+    ], io.StringIO()) == 0
