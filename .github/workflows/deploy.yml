@@ -6,6 +6,17 @@
 # when someone declares an incident, updates one, resolves one, or when the nightly rollup adds a
 # day.
 #
+# THAT LAST ONE WAS FALSE FOR THE FIRST WEEK, and it failed the way this whole repository is built
+# to notice: silently. GitHub does not start a workflow run from an event created with the
+# automatic `GITHUB_TOKEN`, so the rollup's own `git push` -- authenticated with exactly that token
+# -- was not a `push` event as far as this file was concerned. Two nightly rollups committed a day
+# each and neither republished, so the page served a build from forty hours earlier while claiming
+# in its own footer to be a snapshot rebuilt nightly. The rule has no exception worth relying on:
+# `workflow_dispatch` and `repository_dispatch` fired with the same token are suppressed too, so
+# the alternatives were an App token on the push (a credential, and an installation to maintain)
+# or this -- a `workflow_run` trigger, which the rule does not cover and which needs no credential
+# at all.
+#
 # Cloudflare **Pages**, not Workers, against Cloudflare's own advice that new projects should use
 # Workers. A Workers Custom Domain requires an active Cloudflare zone and cannot attach to a
 # hostname carrying an existing CNAME elsewhere, so status.bakobo.com on Workers would force
@@ -23,6 +34,12 @@ name: Deploy
 on:
   push:
     branches: [main]
+  # `workflows` matches the `name:` of the other workflow, not its filename. Renaming Rollup
+  # without changing this line unwires the trigger and nothing anywhere reports it, which is the
+  # second reason the dead-man's switch below is not optional.
+  workflow_run:
+    workflows: [Rollup]
+    types: [completed]
   workflow_dispatch:
 
 permissions:
@@ -38,10 +55,27 @@ jobs:
   deploy:
     name: deploy
     runs-on: ubuntu-latest
+    # Job level rather than step level, for the reason the rollup job records: a step's own `env:`
+    # block is not in scope for that step's own `if:`, so a guard written there reads an empty
+    # string either way and the switch is silently unwired.
+    env:
+      DEPLOY_HEALTHCHECK_URL: ${{ secrets.DEPLOY_HEALTHCHECK_URL }}
+    # `types: [completed]` fires on a failed rollup as well as a successful one, and a rollup that
+    # failed committed nothing -- so there is nothing new to publish and the run would be noise on
+    # a day someone is already reading an alert. Every other trigger passes unconditionally.
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
+          # NOT `github.event.workflow_run.head_sha`, which is the trap here. That is the commit
+          # the ROLLUP ran on -- the state of main before the rollup pushed its day -- so building
+          # from it would deploy the page without the day whose arrival triggered the build, and
+          # the result would look exactly like the bug this trigger exists to fix. The branch head
+          # is what has the day. Checking out `main` rather than a pinned sha also means a build
+          # racing a newer push publishes the newer content, which is what the concurrency group
+          # below already asks for.
+          ref: main
 
       - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
         with:
@@ -72,3 +106,34 @@ jobs:
         # here would be a third party with access to a token in a public repository's secrets.
         # Pinned by exact version so the tool cannot change under us between deploys.
         run: npx --yes wrangler@4.129.0 pages deploy _site --project-name=bakobo-status --branch=main
+
+      # A DEAD-MAN'S SWITCH, for the reason the rollup has one and for one this job earned on its
+      # own. The rollup's argument is ops.md §6's: monitoring for failure misses the case where the
+      # job stopped running, which is the common case. This job proved the argument -- it did not
+      # fail, it was never triggered, so there was no red run to notice and nothing in the Actions
+      # tab looked wrong. The page went stale for forty hours and was caught by a person opening it
+      # and reading the footer.
+      #
+      # Period wants to be a little over a day: the nightly rollup at 02:30 UTC now guarantees a
+      # deploy every day even when nobody pushes, so silence for longer than that means the chain
+      # from schedule to rollup to trigger to publish is broken somewhere, and which link broke is
+      # a question for after the alert.
+      #
+      # This does NOT catch a deploy that succeeds while publishing a stale page -- a green run is
+      # a green run. That gap is what the page reporting its own build age would close, and it is
+      # not closed here.
+      - name: tell the switch how it went
+        if: always() && env.DEPLOY_HEALTHCHECK_URL != ''
+        env:
+          RESULT: ${{ job.status }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          # `always()` so a failed publish pings /fail immediately rather than waiting out the
+          # period, which would arrive hours later and be indistinguishable from never having run.
+          if [ "$RESULT" = "success" ]; then endpoint="$DEPLOY_HEALTHCHECK_URL"; else endpoint="$DEPLOY_HEALTHCHECK_URL/fail"; fi
+          curl -fsS -m 10 --retry 3 -o /dev/null --data-raw "$RESULT $RUN_URL" "$endpoint"
+
+      - name: warn if the switch is not wired
+        if: always() && env.DEPLOY_HEALTHCHECK_URL == ''
+        run: echo "::warning::DEPLOY_HEALTHCHECK_URL is unset, so nothing will notice if this workflow stops being triggered. The deploy still runs -- publishing beats guarding it -- but the failure it just recovered from would recur unobserved."
