@@ -83,9 +83,14 @@ jobs:
           fi
           echo "measured: $(grep -c '"as_of": "' now.json) component(s)"
 
-      # Multipart form with a `value` field, which is what the KV write API takes. The token is
-      # scoped to Workers KV Storage: Edit on one namespace and nothing else -- it cannot touch
-      # Pages, DNS or the account, which matters because this repository is public.
+      # Multipart form with a `value` field, which is what the KV write API takes.
+      #
+      # The token carries Workers KV Storage: Edit and nothing else, so it cannot touch Pages, DNS
+      # or account settings -- which matters because this repository is public and its secrets are
+      # one misconfiguration away from being readable. It is NOT scoped to this namespace, though:
+      # Cloudflare's KV permission is account-level and has no per-namespace resource, so a leak of
+      # this token is write access to every KV namespace on the account. Worth knowing rather than
+      # assuming a tighter blast radius than exists.
       - name: publish to KV
         env:
           CF_ACCOUNT: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
