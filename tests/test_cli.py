@@ -455,15 +455,17 @@ def test_now_records_a_component_that_is_not_answering(estate):
     assert "DOWN as of" in out.getvalue()
 
 
-def test_a_component_with_no_samples_is_omitted_not_written_down(estate):
+def test_a_component_with_no_samples_is_absent_not_down(estate):
     """No probe result is not a probe result meaning down. Writing it as down would put a red row
-    on the page for a check that was deleted."""
+    on the page for a check that was deleted -- and omitting it entirely would leave the browser
+    with nothing to grey out, so the cell would keep whatever the page was built with."""
     out = io.StringIO()
     code = cli._now(now_args(estate), out, client=NowClient(empty_for={"witness-ca"}), at=AT)
     assert code == 0
-    written = json.loads((estate / "now.json").read_text())
-    assert "witness-ca" not in written["components"]
-    assert "witness-ca: nothing measured, omitted" in out.getvalue()
+    entry = json.loads((estate / "now.json").read_text())["components"]["witness-ca"]
+    assert entry["as_of"] is None
+    assert entry["state"] == "no-data"
+    assert "witness-ca: no reading, recorded as absent" in out.getvalue()
 
 
 def test_one_refused_component_still_writes_the_other_six(estate):
@@ -472,7 +474,9 @@ def test_one_refused_component_still_writes_the_other_six(estate):
     code = cli._now(now_args(estate), out, client=NowClient(fail_for={"witness-ca"}), at=AT)
     assert code == 1
     written = json.loads((estate / "now.json").read_text())
-    assert sorted(written["components"]) == ["bakobo-com", "witness-de"]
+    assert [c for c, e in written["components"].items() if e["as_of"]] == \
+        ["bakobo-com", "witness-de"]
+    assert written["components"]["witness-ca"]["state"] == "no-data"
     assert "1 not measured: witness-ca" in out.getvalue()
 
 
