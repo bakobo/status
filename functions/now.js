@@ -19,7 +19,21 @@
 // the bars beside it about what "up" means, and the reader would have no way to tell which half
 // was lying.
 
-export async function onRequestGet({ env }) {
+// One handler for every method, rather than the `onRequestGet` this started as.
+//
+// Pages routes `onRequestGet` to GET alone, and anything else -- HEAD included -- falls straight
+// past the Function to the static asset handler, which answered `HTTP 200 text/html` for a URL
+// that is supposed to be JSON. Browsers GET, so the page never noticed; an uptime monitor pointed
+// here with a HEAD would have got a page of HTML and a 200 saying everything was fine. A status
+// endpoint that lies to monitoring is a particularly bad thing to leave lying around.
+//
+// So the fall-through is closed for every method at once. Answering only HEAD would have left the
+// same surprise waiting behind POST.
+export async function onRequest({ request, env }) {
+  if (request.method !== "GET" && request.method !== "HEAD") {
+    return json({ error: "method not allowed" }, 405, { allow: "GET, HEAD" });
+  }
+
   const body = await env.STATUS.get("now");
 
   if (body === null) {
@@ -29,7 +43,9 @@ export async function onRequestGet({ env }) {
     return json({ error: "no snapshot" }, 503);
   }
 
-  return new Response(body, {
+  // HEAD gets the headers and no body, which is the whole contract of the method -- notably the
+  // same content-type, so a monitor checking it sees JSON rather than being told about HTML.
+  return new Response(request.method === "HEAD" ? null : body, {
     headers: {
       "content-type": "application/json; charset=utf-8",
       // Half the write interval, so a cached copy can never be old enough to trip the page's own
@@ -45,13 +61,14 @@ export async function onRequestGet({ env }) {
   });
 }
 
-function json(payload, status) {
+function json(payload, status, extra = {}) {
   return new Response(JSON.stringify(payload), {
     status,
     headers: {
       "content-type": "application/json; charset=utf-8",
       "cache-control": "no-store",
       "access-control-allow-origin": "*",
+      ...extra,
     },
   });
 }
