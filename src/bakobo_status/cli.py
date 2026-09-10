@@ -338,9 +338,11 @@ def _now(args, out, client=None, environ=None, at=None) -> int:
     seventh. The exit status still reports it, because a component failing every run for a day is
     a broken check rather than a blip.
 
-    A component that returns nothing is OMITTED rather than written as down. There is no probe
-    result that means "down" and no probe result at all; conflating them here would put a red row
-    on the page for a check that was deleted.
+    A component that returns nothing is written with a NULL reading rather than as down. There is
+    no probe result that means "down" and no probe result at all; conflating them would put a red
+    row on the page for a check that was deleted. It still gets an entry, because the browser needs
+    one to grey that cell out -- a component simply missing from the payload would leave whatever
+    the page was built with sitting there unrefreshed.
     """
     environ = os.environ if environ is None else environ
     known = load_components(args.components_file)
@@ -356,7 +358,7 @@ def _now(args, out, client=None, environ=None, at=None) -> int:
             failed.append(component)
             continue
         if reading is None:
-            print(f"{component}: nothing measured, omitted", file=out)
+            print(f"{component}: no reading, recorded as absent", file=out)
             continue
         gathered[component] = reading
         print(
@@ -366,7 +368,12 @@ def _now(args, out, client=None, environ=None, at=None) -> int:
             file=out,
         )
 
-    path = snapshot.Now(args.snapshot).write(at, gathered)
+    # Composed here rather than in `snapshot`, because the payload carries rendered verdicts and
+    # those come from `site` -- the same functions the static page is built with, so the page and
+    # the refresh that overwrites it cannot disagree about the same estate.
+    components = json.loads(args.components_file.read_text(encoding="utf-8"))
+    open_incidents = [i for i in Store(args.root).all() if not i.is_resolved]
+    path = snapshot.Now(args.snapshot).write(site.publish(components, gathered, open_incidents, at))
     print(f"wrote {path} ({len(gathered)}/{len(known)} components)", file=out)
 
     if failed:

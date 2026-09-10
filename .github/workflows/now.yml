@@ -1,0 +1,123 @@
+# Harvest the estate's current state and put it where the page can fetch it, without rebuilding
+# the page.
+#
+# This job exists to undo a mistake. When the page first grew a claim about *now*, the snapshot was
+# baked into the HTML, which meant a claim that goes stale on a clock could only be refreshed by
+# republishing the whole site -- ninety-six Cloudflare deployments a day to change a kilobyte, a
+# build system doing a database's job. Now the data goes to KV, the page fetches it from its own
+# origin through a Pages Function, and deploys happen when CONTENT changes: an incident, a
+# rolled-up day, a change to the code.
+#
+# Fifteen minutes matches the probe period exactly. The underlying truth does not change more often
+# than that, so a tighter schedule buys nothing.
+#
+# Drift is tolerable here in a way it was not before. GitHub delays and drops scheduled workflows
+# under load (rollup.yml says so at length), and while the snapshot was baked into the build a run
+# landing twenty minutes late would push the page past its own forty-five-minute freshness gate and
+# grey it out. With the data fetched at read time, a late run only means the reading is a little
+# older, and the gate still catches a genuinely stopped harvest.
+#
+# A Cloudflare Worker on a cron trigger would remove this job entirely, and was the first choice.
+# Two things stopped it: cron triggers were not firing at all for this account when probed on
+# 2026-09-08, and the free plan allows 10ms of CPU per cron invocation -- enough to await seven
+# Grafana round trips, since I/O is not CPU, but not obviously enough to parse and score their
+# responses. Workers Paid at $5/month lifts the ceiling to 30 seconds and would make the swap
+# worthwhile; nothing here would change except what writes the key.
+
+name: Now
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # Two harvests writing the same key would land in whichever order they finished, and the loser
+  # would overwrite a newer reading with an older one. Serialise; do not cancel, because a run that
+  # is nearly done is worth more than one that has just started.
+  group: now
+  cancel-in-progress: false
+
+jobs:
+  now:
+    name: now
+    runs-on: ubuntu-latest
+    env:
+      NOW_HEALTHCHECK_URL: ${{ secrets.NOW_HEALTHCHECK_URL }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
+        with:
+          enable-cache: true
+
+      - name: sync
+        run: uv sync --frozen
+
+      # Writes now.json: the readings AND the verdicts rendered from them, composed by site.publish
+      # so the page built from this file and the page refreshed from it cannot disagree.
+      - name: harvest
+        timeout-minutes: 3
+        env:
+          GRAFANA_PROM_URL: ${{ vars.GRAFANA_PROM_URL }}
+          GRAFANA_PROM_USER: ${{ vars.GRAFANA_PROM_USER }}
+          GRAFANA_PROM_TOKEN: ${{ secrets.GRAFANA_PROM_TOKEN }}
+        run: uv run bakobo-status now
+
+      # Read back before publishing, the same discipline the rollup uses: the harvest exits 0 when
+      # every query succeeded and every one returned nothing, which is what a renamed metric looks
+      # like. Publishing that would replace a good reading with a page-wide "status unknown".
+      - name: at least one component was actually measured
+        run: |
+          set -euo pipefail
+          if ! grep -q '"as_of": "' now.json; then
+            echo "::error::The harvest exited cleanly but no component has a reading. Not"
+            echo "::error::publishing — the previous key is older but true, and this would be new"
+            echo "::error::and empty."
+            exit 1
+          fi
+          echo "measured: $(grep -c '"as_of": "' now.json) component(s)"
+
+      # Multipart form with a `value` field, which is what the KV write API takes.
+      #
+      # The token carries Workers KV Storage: Edit and nothing else, so it cannot touch Pages, DNS
+      # or account settings -- which matters because this repository is public and its secrets are
+      # one misconfiguration away from being readable. It is NOT scoped to this namespace, though:
+      # Cloudflare's KV permission is account-level and has no per-namespace resource, so a leak of
+      # this token is write access to every KV namespace on the account. Worth knowing rather than
+      # assuming a tighter blast radius than exists.
+      - name: publish to KV
+        env:
+          CF_ACCOUNT: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          CF_NAMESPACE: ${{ vars.CLOUDFLARE_KV_NAMESPACE_ID }}
+          CF_TOKEN: ${{ secrets.CLOUDFLARE_KV_TOKEN }}
+        run: |
+          set -euo pipefail
+          response="$(curl -fsS -X PUT \
+            "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT/storage/kv/namespaces/$CF_NAMESPACE/values/now" \
+            -H "Authorization: Bearer $CF_TOKEN" \
+            -F "value=@now.json" \
+            -F 'metadata={}')"
+          # The API answers 200 with {"success": false, ...} for some refusals, so the exit code is
+          # not the whole story and -f alone would let a failed write look like a good one.
+          grep -q '"success":true' <<<"$response" || { echo "::error::$response"; exit 1; }
+          echo "published $(wc -c < now.json) bytes"
+
+      - name: tell the switch how it went
+        if: always() && env.NOW_HEALTHCHECK_URL != ''
+        env:
+          RESULT: ${{ job.status }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if [ "$RESULT" = "success" ]; then endpoint="$NOW_HEALTHCHECK_URL"; else endpoint="$NOW_HEALTHCHECK_URL/fail"; fi
+          curl -fsS -m 10 --retry 3 -o /dev/null --data-raw "$RESULT $RUN_URL" "$endpoint"
+
+      - name: warn if the switch is not wired
+        if: always() && env.NOW_HEALTHCHECK_URL == ''
+        run: echo "::warning::NOW_HEALTHCHECK_URL is unset. A stopped harvest greys the page for readers within 45 minutes, which is honest but tells nobody who can fix it. Period wants to be about an hour."
