@@ -40,6 +40,17 @@ jobs:
       - name: pytest
         run: uv run pytest --cov=bakobo_status --cov-report=term-missing
 
+      # The Pages Function runs on every page load and is production code, so it is held to the
+      # same standard as the rest -- it shipped answering 200 text/html to a HEAD, which no check
+      # then in place could see. `node --test` is built in and the runner has node, so this needs
+      # no action and no dependency; pinning setup-node here would add a third party to a job that
+      # does not otherwise have one.
+      - name: the snapshot endpoint behaves
+        run: |
+          set -euo pipefail
+          node --version
+          node --test tests/now.test.mjs
+
       # The CLI has to actually start. A package whose tests import it happily can still ship a
       # broken console script -- a bad entry point is invisible to pytest and obvious to the first
       # person who runs it, which during an outage is the worst possible time to find out.
