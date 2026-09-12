@@ -42,6 +42,6 @@ We will not pursue or support legal action against anyone who reports a vulnerab
 There is no bug bounty. We are not able to pay for reports, and we would rather say so plainly than imply otherwise.
 
 
-## This repository's licence carries no warranty
+## No warranty
 
-Everything here ships under `LICENSE`, which disclaims warranties. Nothing in this policy changes that — it describes how we intend to behave, not a contractual obligation.
+Everything here is published as-is. Nothing in this policy is a contractual obligation; it describes how we intend to behave.
