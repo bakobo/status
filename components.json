@@ -33,5 +33,10 @@
     "display": "cesrview.bakobo.com",
     "job": "cesrview",
     "kind": "web"
+  },
+  "errors": {
+    "display": "errors.bakobo.com",
+    "job": "errors",
+    "kind": "web"
   }
 }

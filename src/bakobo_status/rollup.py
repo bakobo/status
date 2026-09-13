@@ -180,7 +180,7 @@ def summarize(uptime_matrix, reachability_vector, executions_vector, successes_v
 class History:
     """The per-component history files, which are the durable record.
 
-    One file per component rather than one file for everything: a day's rollup then touches seven
+    One file per component rather than one file for everything: a day's rollup then touches eight
     small files instead of rewriting one large one, so a review shows which components changed, and
     two components' histories cannot be lost to one bad write.
     """
