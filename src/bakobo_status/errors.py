@@ -9,9 +9,15 @@ of the target", and ``e.*.r`` is "retrying could help" whatever the descriptor.
 Codes are declared as module-scope literals rather than assembled, so they can be extracted by
 static analysis and reconciled against the catalog in bakobo/errors.
 
-Every code here is final (``.f``). That is not an oversight: this tool's failures are all
-disagreements between what the operator typed and what is on disk, and none of them resolve by
-waiting. A retryable code in this module would be a lie about a filesystem.
+Nearly every code here is final (``.f``), and that is not an oversight: most of this tool's
+failures are disagreements between what the operator typed and what is on disk, and none of those
+resolve by waiting. A retryable code for a filesystem would be a lie.
+
+The exception is ``METRICS_UNREACHABLE``, which is ``.r`` because Grafana being unreachable is
+precisely the kind of thing that does resolve by waiting. It is the one obstacle in this module
+that lives on another machine, which is the test -- reach for ``.r`` when the obstacle is somewhere
+a retry could find in a different state, and for ``.f`` when it is right here and will not have
+moved.
 """
 
 from __future__ import annotations
