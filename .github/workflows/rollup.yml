@@ -120,9 +120,27 @@ jobs:
         if: env.HEALTHCHECK_URL != ''
         run: curl -fsS -m 10 --retry 3 -o /dev/null "$HEALTHCHECK_URL/start"
 
-      - name: warn if the switch is not wired
-        if: env.HEALTHCHECK_URL == ''
-        run: echo "::warning::HEALTHCHECK_URL is unset, so this run is unmonitored. The rollup still runs -- losing days is worse than losing the guard -- but nothing will notice if it stops."
+      # A switch that is unset says so, and a switch set to something that is not a URL says so
+      # LOUDER, because that second case looked like a flaky ping for days. `NOW_HEALTHCHECK_URL`
+      # and `DEPLOY_HEALTHCHECK_URL` each held a value that was not a URL from the day they were
+      # added: every ping died on `curl: (3) URL rejected: No host part in the URL`, every run went
+      # red at its last step, and neither switch had ever once worked.
+      #
+      # It does NOT exit non-zero, deliberately. The same step guards Now and Deploy, where it runs
+      # before the harvest and the publish -- so failing here would take the page's data down in
+      # order to report that its alarm was misconfigured, which is the guard doing more damage than
+      # the thing it guards against. The annotation puts the cause at the top of the run; the ping
+      # step below still fails, so the run is red either way. What changes is that the reason is
+      # legible instead of being inferred from a curl exit code.
+      - name: the switch is a URL, or says why not
+        if: always()
+        run: |
+          set -euo pipefail
+          if [ -z "$HEALTHCHECK_URL" ]; then
+            echo "::warning::HEALTHCHECK_URL is unset, so this run is unmonitored. The rollup still runs -- losing days is worse than losing the guard -- but nothing will notice if it stops."
+          elif [ "${HEALTHCHECK_URL#https://}" = "$HEALTHCHECK_URL" ]; then
+            echo "::error::HEALTHCHECK_URL is set but does not begin with https://, so every ping fails and this switch has never worked. A healthchecks.io ping address is the whole URL, https://hc-ping.com/<uuid>, not the uuid on its own."
+          fi
 
       - name: roll up
         env:
