@@ -197,7 +197,62 @@ jobs:
             exit 0
           fi
           git commit -s -m "rollup: $DAY and any backfilled days"
-          git push
+
+          # Rebase and retry, because losing the race costs a whole day.
+          #
+          # The concurrency group above keeps two rollups from racing each other, so the only
+          # contention left is a human -- somebody merging a pull request, or posting an incident,
+          # in the ninety seconds between this job's checkout and this push. That is not
+          # hypothetical: it happened on the first run after the App token landed, when a merge
+          # arrived 44 seconds into the job and the push was refused as a non-fast-forward.
+          #
+          # Without a retry the cost is a full day. The commit is built and thrown away, the switch
+          # is told the rollup failed, and the next attempt is the next night -- by which point the
+          # day is one day nearer the fourteen-day retention wall, and a run that fails this way
+          # twenty-four hours apart twice in a row is a hole nothing can fill.
+          #
+          # A rebase rather than a merge: this commit touches only `history/`, which nothing else
+          # writes, so there is no conflict to resolve and a merge commit would be noise in a
+          # history that is read as a ledger. A failed rebase is left for a person -- it means
+          # something DID edit the same day's records, and guessing at that is worse than stopping.
+          # Only staleness is retried, and the distinction is the difference between a diagnosis
+          # and a guess. A push can also be refused by the ruleset (GH013, which is what three
+          # nights of this job looked like before the App token) or by a bad credential -- and
+          # neither improves on the second attempt. Retrying those would spend two more pushes to
+          # arrive at the same failure, under a warning blaming a `main` that never moved, which is
+          # worse than not retrying at all: it is a wrong explanation attached to a real outage.
+          for attempt in 1 2 3; do
+            if push_output="$(git push 2>&1)"; then
+              echo "$push_output"
+              exit 0
+            fi
+            echo "$push_output"
+            case "$push_output" in
+              *"fetch first"* | *"non-fast-forward"* | *"behind its remote"*)
+                echo "::warning::Push rejected on attempt $attempt because the remote moved while this job ran. Rebasing and retrying."
+                ;;
+              *)
+                echo "::error::The push was refused for a reason other than staleness, so retrying"
+                echo "::error::would spend two more attempts reaching the same place. If this is"
+                echo "::error::GH013, check that bakobo-status-writer is still a bypass actor on"
+                echo "::error::main's ruleset -- it is declared in infra, tofu/envs/prod/github."
+                exit 1
+                ;;
+            esac
+            git fetch origin main
+            if ! git rebase origin/main; then
+              git rebase --abort || true
+              echo "::error::The rebase onto origin/main conflicted, which means something other"
+              echo "::error::than this job edited the same history records. Not guessing: $DAY is"
+              echo "::error::still recoverable from Grafana until its fourteenth day, and a person"
+              echo "::error::should look before it is committed."
+              exit 1
+            fi
+          done
+          echo "::error::Three pushes were rejected in a row. Either main is being written to"
+          echo "::error::continuously or something is rejecting this push for a reason other than"
+          echo "::error::staleness -- check whether the App's ruleset bypass is still in place."
+          exit 1
 
       # The body carries the run URL, so the alert healthchecks.io sends links straight to the
       # failing run rather than to a name that has to be looked up.
