@@ -12,7 +12,7 @@ That shapes what is useful to send us.
 
 **Report a vulnerability privately.** Use the *Report a vulnerability* button under the **Security** tab, or email `security@bakobo.com`. Never open a public issue for a security problem. `SECURITY.md` has the detail, including what we commit to and how fast.
 
-**Ask, if you want to use something.** Open an issue or email `hello@bakobo.com` and say what for. The answer is often yes; it just has to be asked rather than assumed.
+**Ask, if you want to use something.** Open an issue or email `info@bakobo.com` and say what for. The answer is often yes; it just has to be asked rather than assumed.
 
 ## What we are not set up for
 
