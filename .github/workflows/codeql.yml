@@ -3,6 +3,13 @@ name: CodeQL
 on:
   push:
     branches: [main]
+    # Same exclusion as ci.yml, and this is the more expensive of the two: an analysis job costs
+    # minutes where the suite costs seconds, and the nightly rollup commit contains no code to
+    # analyze -- only `history/`. Excluding it from CI and not from here would have moved the
+    # nightly cost rather than removed it. The weekly run still scans the whole tree, which is what
+    # catches a vulnerability disclosed after the last commit.
+    paths-ignore:
+      - "history/**"
   pull_request:
   schedule:
     # Weekly, because a scanner that only runs on your commits never finds the vulnerability that

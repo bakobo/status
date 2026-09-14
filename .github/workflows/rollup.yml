@@ -114,12 +114,6 @@ jobs:
           echo "day=$day" >> "$GITHUB_OUTPUT"
           echo "Rolling up $day"
 
-      # Told before the work, so a job that dies mid-run is distinguishable from one that never
-      # started. healthchecks.io holds the run open until a success or failure ping arrives.
-      - name: tell the switch we started
-        if: env.HEALTHCHECK_URL != ''
-        run: curl -fsS -m 10 --retry 3 -o /dev/null "$HEALTHCHECK_URL/start"
-
       # A switch that is unset says so, and a switch set to something that is not a URL says so
       # LOUDER, because that second case looked like a flaky ping for days. `NOW_HEALTHCHECK_URL`
       # and `DEPLOY_HEALTHCHECK_URL` each held a value that was not a URL from the day they were
@@ -141,6 +135,19 @@ jobs:
           elif [ "${HEALTHCHECK_URL#https://}" = "$HEALTHCHECK_URL" ]; then
             echo "::error::HEALTHCHECK_URL is set but does not begin with https://, so every ping fails and this switch has never worked. A healthchecks.io ping address is the whole URL, https://hc-ping.com/<uuid>, not the uuid on its own."
           fi
+
+      # Told before the work, so a job that dies mid-run is distinguishable from one that never
+      # started. healthchecks.io holds the run open until a success or failure ping arrives.
+      #
+      # `continue-on-error`, and it is not decoration. `curl -f` against a malformed address exits
+      # 3, and a failing step with no tolerance skips every later step in the job -- so a mistyped
+      # secret would stop the rollup from collecting the day, and the day would be gone at fourteen
+      # days. A dead-man's switch that can kill the thing it watches is worse than no switch. The
+      # guard above has already said what is wrong with the address; this just refuses to act on it.
+      - name: tell the switch we started
+        if: env.HEALTHCHECK_URL != ''
+        continue-on-error: true
+        run: curl -fsS -m 10 --retry 3 -o /dev/null "$HEALTHCHECK_URL/start"
 
       - name: roll up
         env:
