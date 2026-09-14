@@ -52,6 +52,21 @@ jobs:
         with:
           persist-credentials: false
 
+      # The same guard the rollup carries, and this workflow is why it exists: NOW_HEALTHCHECK_URL
+      # held a value that was not a URL from the day it was added, so every ping died on
+      # `curl: (3) URL rejected: No host part in the URL` and this switch never once worked. It
+      # does not exit non-zero -- see rollup.yml for why a guard that stops the publish would do
+      # more damage than the misconfiguration it reports.
+      - name: the switch is a URL, or says why not
+        if: always()
+        run: |
+          set -euo pipefail
+          if [ -z "$NOW_HEALTHCHECK_URL" ]; then
+            echo "::warning::NOW_HEALTHCHECK_URL is unset. A stopped harvest greys the page for readers within 45 minutes, which is honest but tells nobody who can fix it. Period wants to be about an hour."
+          elif [ "${NOW_HEALTHCHECK_URL#https://}" = "$NOW_HEALTHCHECK_URL" ]; then
+            echo "::error::NOW_HEALTHCHECK_URL is set but does not begin with https://, so every ping fails and this switch has never worked. A healthchecks.io ping address is the whole URL, https://hc-ping.com/<uuid>, not the uuid on its own."
+          fi
+
       - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
         with:
           enable-cache: true
@@ -108,6 +123,54 @@ jobs:
           grep -q '"success":true' <<<"$response" || { echo "::error::$response"; exit 1; }
           echo "published $(wc -c < now.json) bytes"
 
+      # This job watches the ROLLUP, which is a different job on a different schedule.
+      #
+      # The reason is the outage of 2026-09-12 to 09-14. The rollup's own switch worked perfectly
+      # and pinged /fail three nights running; nobody was reading that channel, and the stall was
+      # found by a person looking at the page and noticing the bars had stopped. A once-a-night
+      # alarm is easy to miss precisely because it arrives once a night. This job runs every
+      # fifteen minutes and is the healthiest thing in the repository, so it is the right one to
+      # carry the news: a stalled rollup now fails 96 runs a day instead of one.
+      #
+      # LAST, deliberately, after the harvest and the publish. Failing earlier would stop the
+      # snapshot -- taking the page's data down to report that a different job is behind, which is
+      # backwards. By here the work is done and all this changes is `job.status`, which sends the
+      # ping below to /fail.
+      #
+      # The expected day is exact rather than a tolerance: yesterday once the 02:30 rollup window
+      # has passed, the day before until then. So a single missed run is caught the same morning
+      # rather than a day later, and no normal state ever trips it.
+      - name: the rollup is still advancing
+        if: always()
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import datetime as dt, glob, json, sys
+
+          days = set()
+          for path in glob.glob("history/*.json"):
+              with open(path, encoding="utf-8") as handle:
+                  days |= set(json.load(handle).get("days", {}))
+
+          now = dt.datetime.now(dt.timezone.utc)
+          # 04:00 rather than 02:30: the rollup starts then and takes a few minutes, and a guard
+          # that fires while the job it watches is still running would report its own impatience.
+          expected = (now.date() - dt.timedelta(days=1 if now.hour >= 4 else 2)).isoformat()
+          newest = max(days) if days else None
+
+          if newest is None:
+              print("::error::No day is recorded in history/ at all, so either the rollup has never "
+                    "succeeded or the history tree is missing from this checkout.")
+              sys.exit(1)
+          if newest < expected:
+              print(f"::error::The newest rolled-up day is {newest}, and {expected} was due. The "
+                    f"nightly rollup has stopped advancing -- check the Rollup workflow. Grafana "
+                    f"Cloud drops metrics at 14 days, so every day missing past that is gone "
+                    f"permanently; --backfill repairs the rest on the first successful run.")
+              sys.exit(1)
+          print(f"newest rolled-up day is {newest}, expected at least {expected}")
+          PY
+
       - name: tell the switch how it went
         if: always() && env.NOW_HEALTHCHECK_URL != ''
         env:
@@ -117,7 +180,3 @@ jobs:
           set -euo pipefail
           if [ "$RESULT" = "success" ]; then endpoint="$NOW_HEALTHCHECK_URL"; else endpoint="$NOW_HEALTHCHECK_URL/fail"; fi
           curl -fsS -m 10 --retry 3 -o /dev/null --data-raw "$RESULT $RUN_URL" "$endpoint"
-
-      - name: warn if the switch is not wired
-        if: always() && env.NOW_HEALTHCHECK_URL == ''
-        run: echo "::warning::NOW_HEALTHCHECK_URL is unset. A stopped harvest greys the page for readers within 45 minutes, which is honest but tells nobody who can fix it. Period wants to be about an hour."

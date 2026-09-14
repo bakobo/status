@@ -17,6 +17,13 @@
 # or this -- a `workflow_run` trigger, which the rule does not cover and which needs no credential
 # at all.
 #
+# The rollup has since acquired that App token anyway, for an unrelated reason: main's ruleset
+# refuses a GITHUB_TOKEN push outright. So the suppression no longer applies and this file could
+# now rely on the push event. It does not, for two reasons. `workflow_run` fires on the rollup
+# COMPLETING rather than on its push, which also covers the run that had nothing to commit; and
+# keeping both routes live for the same rollup would start two builds, which is what the
+# `paths-ignore` below exists to prevent.
+#
 # Cloudflare **Pages**, not Workers, against Cloudflare's own advice that new projects should use
 # Workers. A Workers Custom Domain requires an active Cloudflare zone and cannot attach to a
 # hostname carrying an existing CNAME elsewhere, so status.bakobo.com on Workers would force
@@ -34,6 +41,20 @@ name: Deploy
 on:
   push:
     branches: [main]
+    # `history/**` is excluded here so that a rollup produces exactly ONE deploy.
+    #
+    # It did not need excluding while the rollup pushed with GITHUB_TOKEN, because that push was
+    # not an event at all -- which is the whole subject of the paragraph above. Now that the push
+    # carries an App token it IS one, so without this line a nightly rollup would match both
+    # triggers and start two builds. The concurrency group would cancel one of them, and a
+    # cancelled run still pings the dead-man's switch from its `always()` step -- reporting a
+    # failure that is really a race with itself, on the one channel that must not cry wolf.
+    #
+    # The `workflow_run` trigger below stays as the rollup's route, rather than this one, because
+    # it fires on the rollup COMPLETING rather than on its push -- so it also covers a rollup that
+    # had nothing to commit and pushed nothing.
+    paths-ignore:
+      - "history/**"
   # `workflows` matches the `name:` of the other workflow, not its filename. Renaming Rollup
   # without changing this line unwires the trigger and nothing anywhere reports it, which is the
   # second reason the dead-man's switch below is not optional.
@@ -81,6 +102,20 @@ jobs:
           # racing a newer push publishes the newer content, which is what the concurrency group
           # below already asks for.
           ref: main
+
+      # The same guard the rollup and the harvest carry, and this workflow is one of the two that
+      # needed it: DEPLOY_HEALTHCHECK_URL held a value that was not a URL from the day it was
+      # added, so every deploy ended red at its last step while the deploy itself had succeeded.
+      # It does not exit non-zero -- see rollup.yml for why.
+      - name: the switch is a URL, or says why not
+        if: always()
+        run: |
+          set -euo pipefail
+          if [ -z "$DEPLOY_HEALTHCHECK_URL" ]; then
+            echo "::warning::DEPLOY_HEALTHCHECK_URL is unset, so nothing will notice if this workflow stops being triggered. The deploy still runs -- publishing beats guarding it -- but the failure it just recovered from would recur unobserved."
+          elif [ "${DEPLOY_HEALTHCHECK_URL#https://}" = "$DEPLOY_HEALTHCHECK_URL" ]; then
+            echo "::error::DEPLOY_HEALTHCHECK_URL is set but does not begin with https://, so every ping fails and this switch has never worked. A healthchecks.io ping address is the whole URL, https://hc-ping.com/<uuid>, not the uuid on its own."
+          fi
 
       - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
         with:
@@ -174,7 +209,3 @@ jobs:
           # period, which would arrive hours later and be indistinguishable from never having run.
           if [ "$RESULT" = "success" ]; then endpoint="$DEPLOY_HEALTHCHECK_URL"; else endpoint="$DEPLOY_HEALTHCHECK_URL/fail"; fi
           curl -fsS -m 10 --retry 3 -o /dev/null --data-raw "$RESULT $RUN_URL" "$endpoint"
-
-      - name: warn if the switch is not wired
-        if: always() && env.DEPLOY_HEALTHCHECK_URL == ''
-        run: echo "::warning::DEPLOY_HEALTHCHECK_URL is unset, so nothing will notice if this workflow stops being triggered. The deploy still runs -- publishing beats guarding it -- but the failure it just recovered from would recur unobserved."
