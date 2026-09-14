@@ -35,8 +35,11 @@ on:
         required: false
         type: string
 
+# Read, not write. The commit is pushed with a GitHub App token minted below, and the automatic
+# GITHUB_TOKEN does nothing here but fetch -- so leaving it at `write` would describe an authority
+# this job no longer uses.
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   # Two rollups writing the same history file would race on the commit, and the loser's day is not
@@ -54,7 +57,31 @@ jobs:
     env:
       HEALTHCHECK_URL: ${{ secrets.HEALTHCHECK_URL }}
     steps:
+      # The push needs an identity that can write to main, and the automatic GITHUB_TOKEN is not
+      # one. `main` carries a ruleset requiring a pull request and the `test` check, whose only
+      # bypass actors are organization admins and this App -- so from 2026-09-12 to 2026-09-14 the
+      # job queried Grafana, wrote the records, committed, and had the push refused by GH013 three
+      # nights running while the public page silently stopped advancing.
+      #
+      # A pull request per night was the obvious alternative and does not work: GitHub starts no
+      # workflow run from an event created with GITHUB_TOKEN, so `test` would never report and the
+      # PR could never satisfy the gate it was opened to satisfy. The same rule is why deploy.yml
+      # triggers on `workflow_run` rather than on this push.
+      #
+      # client-id is a public identifier, not a credential; only the private key is secret, and it
+      # is recoverable from infra's secrets/github-apps.yaml. bakobo-status-writer is installed on
+      # this repository alone with contents:write, and the token it mints expires by itself.
+      - name: Mint a token that may write to main
+        id: writer
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
+        with:
+          client-id: Iv23li9meHvQLUWELkLJ
+          private-key: ${{ secrets.STATUS_WRITER_PRIVATE_KEY }}
+
+      # The token is persisted as the checkout's credential, which is what `git push` below uses.
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          token: ${{ steps.writer.outputs.token }}
 
       - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
         with:
