@@ -12,6 +12,14 @@ name: CI
 on:
   push:
     branches: [main]
+    # The nightly rollup's commit touches nothing but `history/`, which is data this suite does not
+    # test, and as of the App token that push DOES start workflow runs where the old GITHUB_TOKEN
+    # one could not. Without this the rollup would buy a job a night -- and billing rounds every job
+    # up to a whole minute, which is what exhausted the organization's allowance once already
+    # (infra rulesets.auto.tfvars:22). Pull requests are unaffected: `test` still runs on every one,
+    # which is what the ruleset requires.
+    paths-ignore:
+      - "history/**"
   pull_request:
 
 permissions:
