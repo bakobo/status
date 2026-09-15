@@ -47,7 +47,7 @@ Both definitions are Grafana's own, so the page agrees with the Synthetics UI a 
 
 ## Now, which is a different claim from today
 
-The current status is **not baked into the page**. It is harvested every fifteen minutes into a Cloudflare KV key and served from `status.bakobo.com/now` by a Pages Function (`functions/now.js`); the page fetches it on load and swaps in the result. The page itself is rebuilt only when its *content* changes — an incident, a rolled-up day, a code change.
+The current status is **not baked into the page**. It is harvested every fifteen minutes into a Cloudflare KV key and served from `status.bakobo.com/now` by a Pages Function (`functions/now.js`); the page fetches it on load and swaps in the result. The harvest runs on the estate's cron host (`bakobo/infra`, `tofu/envs/prod/cron`) rather than in Actions — GitHub delivered about 7% of a `*/15` schedule when measured over four days, with every gap exceeding this page's own freshness gate, so the page was grey almost all of the time. The page itself is rebuilt only when its *content* changes — an incident, a rolled-up day, a code change.
 
 That split exists because the first version did the obvious thing and baked the snapshot into the HTML, which meant the only way to refresh a claim that goes stale on a clock was to republish the whole site: ninety-six deployments a day to change a kilobyte, with a build system doing a database's job.
 

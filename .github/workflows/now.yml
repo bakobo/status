@@ -9,7 +9,8 @@
 # rolled-up day, a change to the code.
 #
 # Fifteen minutes matches the probe period exactly. The underlying truth does not change more often
-# than that, so a tighter schedule buys nothing.
+# than that, so a tighter schedule buys nothing. The estate's cron host now keeps that cadence; see
+# the note above `on:` for why Actions could not.
 #
 # Drift is tolerable here in a way it was not before. GitHub delays and drops scheduled workflows
 # under load (rollup.yml says so at length), and while the snapshot was baked into the build a run
@@ -26,9 +27,26 @@
 
 name: Now
 
+# NO SCHEDULE ANY MORE. bakobo/infra's prod/cron host runs this harvest every fifteen minutes on a
+# systemd timer, and this workflow is kept only as the manual path for when that host is down.
+#
+# WHY IT MOVED, measured rather than felt. Over 2026-09-11..14 this `*/15` cron produced 26
+# scheduled runs where roughly 370 were due -- about 7% -- with a median gap of 182 minutes and a
+# worst of 399. Every one of those 26 gaps exceeded the page's own 45-minute freshness gate, so
+# status.bakobo.com showed grey essentially continuously. That is independent of the healthcheck
+# bug those runs were also hitting: the harvest and the KV write inside them succeeded, so the data
+# was landing, just hours apart.
+#
+# The control is in this repository over the same days. rollup.yml's daily cron fired 4 times out
+# of 4 WHILE FAILING EVERY TIME on an unrelated bug -- which rules out both backoff and
+# credentials, and leaves frequency as the only variable. A slower cron is not a fix: 60 minutes
+# would be dropped the same way and still lose to the gate.
+#
+# ONE WRITER, which is the other half of the reason. Both this workflow and the host write the same
+# KV key, and neither can see the other's lock -- Cloudflare KV has no compare-and-swap, so a late
+# Actions run could overwrite a newer host reading with an older one. flock does not help across
+# two machines. Leaving `workflow_dispatch` is safe because a human choosing to run it knows why.
 on:
-  schedule:
-    - cron: "*/15 * * * *"
   workflow_dispatch:
 
 permissions:
@@ -62,7 +80,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ -z "$NOW_HEALTHCHECK_URL" ]; then
-            echo "::warning::NOW_HEALTHCHECK_URL is unset. A stopped harvest greys the page for readers within 45 minutes, which is honest but tells nobody who can fix it. Period wants to be about an hour."
+            echo "::warning::NOW_HEALTHCHECK_URL is unset. A stopped harvest greys the page for readers within 45 minutes, which is honest but tells nobody who can fix it. The check's period is fifteen minutes, matching the cron host's timer, with grace enough that one missed run is not an alarm."
           elif [ "${NOW_HEALTHCHECK_URL#https://}" = "$NOW_HEALTHCHECK_URL" ]; then
             echo "::error::NOW_HEALTHCHECK_URL is set but does not begin with https://, so every ping fails and this switch has never worked. A healthchecks.io ping address is the whole URL, https://hc-ping.com/<uuid>, not the uuid on its own."
           fi
